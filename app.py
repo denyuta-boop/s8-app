@@ -32,8 +32,9 @@ DEFAULT_LOT_SIZE = {
 
 @st.cache_data(ttl=3600)
 def fetch_data(tickers, days=365):
-    """データ取得 (キャッシュ機能付きで高速化)"""
+    """データ取得 (エラー回避の強化版)"""
     try:
+        # データを取得
         data = yf.download(tickers, period=f"{days}d", progress=False, auto_adjust=True)
         if data.empty: return None, {}, None
         
@@ -44,11 +45,19 @@ def fetch_data(tickers, days=365):
         else:
             df = data["Close"] if "Close" in data.columns else data
 
-        latest_rates = df.iloc[-1].to_dict()
+        # ★ここが修正ポイント: 先に穴埋め(ffill/bfill)してから最新レートを取る
         df_filled = df.ffill().bfill()
+        
+        # 最新レート取得 (iloc[-1]がNaNになるのを防ぐ)
+        latest_rates = df_filled.iloc[-1].to_dict()
+        
+        # リターン計算
         returns = np.log(df_filled).diff().dropna()
+        
         return returns, latest_rates, df_filled
-    except: return None, {}, None
+    except Exception as e:
+        st.error(f"データ処理中にエラーが発生しました: {e}")
+        return None, {}, None
 
 def calculate_beta(asset_returns, benchmark_returns):
     idx = asset_returns.index.intersection(benchmark_returns.index)
@@ -73,7 +82,7 @@ def generate_weights(n):
 with st.sidebar:
     st.header("⚙️ 設定パネル")
     
-    # パスワード制限 (Note販売用)
+    # パスワード制限
     password = st.text_input("🔑 パスワード", type="password")
     if password != "s6secret":
         st.warning("パスワードを入力してください")
@@ -181,6 +190,11 @@ if st.button("🚀 計算スタート", type="primary"):
                         for ccy, w in s_pat.items():
                             lots = (side_notional * w) / (current_rates[ccy] * DEFAULT_LOT_SIZE[ccy])
                             daily_swap += lots * swap_inputs.get(ccy, 0)
+                        
+                        # ★ここが修正ポイント: 計算結果がNaNならリストに入れない
+                        if np.isnan(daily_swap):
+                            continue
+
                         valid_plans.append({"buy": b_pat, "sell": s_pat, "beta": net_beta, "swap": daily_swap})
                     except: continue
 
@@ -191,11 +205,15 @@ if st.button("🚀 計算スタート", type="primary"):
             valid_plans.sort(key=lambda x: x["swap"], reverse=True)
             best = valid_plans[0]
             
+            # ★ここが修正ポイント: 表示時にも安全策としてNaNチェックを入れる
+            best_swap_val = best['swap']
+            if np.isnan(best_swap_val): best_swap_val = 0
+
             st.success("🎉 計算完了！最適なプランが見つかりました")
             
             m1, m2, m3 = st.columns(3)
-            m1.metric("💰 予想日次スワップ", f"¥{int(best['swap']):,}")
-            m1.metric("📈 予想年利", f"{(best['swap'] * 365 / capital * 100):.1f}%")
+            m1.metric("💰 予想日次スワップ", f"¥{int(best_swap_val):,}")
+            m1.metric("📈 予想年利", f"{(best_swap_val * 365 / capital * 100):.1f}%")
             m2.metric("⚖️ ポートフォリオβ", f"{best['beta']:.4f}")
             m3.metric("🛡️ 必要証拠金 (目安)", f"¥{int(target_notional / 25):,}")
 
@@ -221,7 +239,7 @@ if st.button("🚀 計算スタート", type="primary"):
                 if ccy in df_returns.columns: sell_series += df_returns[ccy] * w
             
             daily_capital_pl = (buy_series - sell_series) * side_notional
-            total_pl = (daily_capital_pl + best['swap']).cumsum()
+            total_pl = (daily_capital_pl + best_swap_val).cumsum()
             capital_only = daily_capital_pl.cumsum()
             
             # 損益グラフ
