@@ -45,10 +45,10 @@ def fetch_data(tickers, days=365):
         else:
             df = data["Close"] if "Close" in data.columns else data
 
-        # ★ここが修正ポイント: 先に穴埋め(ffill/bfill)してから最新レートを取る
+        # データの穴埋め
         df_filled = df.ffill().bfill()
         
-        # 最新レート取得 (iloc[-1]がNaNになるのを防ぐ)
+        # 最新レート取得
         latest_rates = df_filled.iloc[-1].to_dict()
         
         # リターン計算
@@ -56,7 +56,6 @@ def fetch_data(tickers, days=365):
         
         return returns, latest_rates, df_filled
     except Exception as e:
-        st.error(f"データ処理中にエラーが発生しました: {e}")
         return None, {}, None
 
 def calculate_beta(asset_returns, benchmark_returns):
@@ -82,7 +81,6 @@ def generate_weights(n):
 with st.sidebar:
     st.header("⚙️ 設定パネル")
     
-    # パスワード制限
     password = st.text_input("🔑 パスワード", type="password")
     if password != "s6secret":
         st.warning("パスワードを入力してください")
@@ -99,7 +97,6 @@ with st.sidebar:
 # --- メイン画面 ---
 st.title("📱 S6戦略 自動最適化ツール")
 
-# 通貨ペア選択
 col1, col2 = st.columns(2)
 with col1:
     buy_candidates = st.multiselect("📈 買い候補", 
@@ -110,7 +107,6 @@ with col2:
                                      ["USDJPY", "CHFJPY", "EURJPY"],
                                      default=["USDJPY", "CHFJPY", "EURJPY"])
 
-# 計算ボタン
 if st.button("🚀 計算スタート", type="primary"):
     
     if len(buy_candidates) < 2 or len(sell_candidates) < 1:
@@ -128,26 +124,43 @@ if st.button("🚀 計算スタート", type="primary"):
             st.error("❌ データ取得エラー。Yahoo Financeに接続できませんでした。")
             st.stop()
             
-        # マッピングとレート整理
+        # ★ここが修正ポイント: カラム名の強制クリーニング
+        # MXNJPY=X が来ても mxnjpy=x が来ても MXNJPY に統一する
         inv_map = {v: k for k, v in TICKER_MAP.items()}
-        new_cols = [inv_map.get(c, c) for c in df_returns.columns]
+        
+        new_cols = []
+        for c in df_returns.columns:
+            # 文字列化して =X を削除し、大文字に統一
+            clean_name = str(c).upper().replace("=X", "").replace("=x", "")
+            # TICKER_MAPのキーにあるか確認
+            if clean_name in TICKER_MAP:
+                new_cols.append(clean_name)
+            else:
+                # 見つからない場合は元のカラム名を使用（マッピング試行）
+                new_cols.append(inv_map.get(c, c))
+        
         df_returns.columns = new_cols
         
+        # レート辞書の整理
         current_rates = {}
         for k, v in latest_rates_raw.items():
-            key_str = k[1] if isinstance(k, tuple) else k
-            found = False
-            for t_name, t_code in TICKER_MAP.items():
-                if t_code == key_str or t_name == key_str:
-                    current_rates[t_name] = v
-                    found = True
-                    break
-            if not found: current_rates[inv_map.get(k, k)] = v
-
+            # キーがタプルの場合などの処理
+            key_str = str(k[1] if isinstance(k, tuple) else k).upper().replace("=X", "")
+            
+            # マッチング
+            if key_str in TICKER_MAP:
+                current_rates[key_str] = v
+            else:
+                # 予備検索
+                for t_name, t_code in TICKER_MAP.items():
+                    if t_code == k or t_name == k:
+                        current_rates[t_name] = v
+                        break
+        
         # 2. β計算
         betas = {}
         if "USDJPY" not in df_returns.columns:
-            st.error("❌ USDJPYデータ不足")
+            st.error(f"❌ USDJPYデータ不足 (取得カラム: {list(df_returns.columns)})")
             st.stop()
             
         for col in df_returns.columns:
@@ -158,7 +171,6 @@ if st.button("🚀 計算スタート", type="primary"):
         target_notional = capital * leverage
         valid_plans = []
         
-        # 組み合わせ生成
         buy_combos = []
         if len(buy_candidates) >= 3:
             for combo in itertools.combinations(buy_candidates, 3):
@@ -173,27 +185,28 @@ if st.button("🚀 計算スタート", type="primary"):
                 for wp in generate_weights(2): sell_combos.append({combo[i]: wp[i] for i in range(2)})
         for c in sell_candidates: sell_combos.append({c: 1.0})
         
-        # 探索ループ
         for b_pat in buy_combos:
             b_beta = sum(betas.get(ccy, 0) * w for ccy, w in b_pat.items())
             for s_pat in sell_combos:
                 s_beta = sum(betas.get(ccy, 0) * w for ccy, w in s_pat.items()) * -1
                 net_beta = b_beta + s_beta
                 
-                if abs(net_beta) < 0.15: # β許容範囲
+                if abs(net_beta) < 0.15:
                     side_notional = target_notional / 2
                     daily_swap = 0
                     try:
                         for ccy, w in b_pat.items():
-                            lots = (side_notional * w) / (current_rates[ccy] * DEFAULT_LOT_SIZE[ccy])
+                            rate = current_rates.get(ccy, 0)
+                            if rate == 0: continue
+                            lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
                             daily_swap += lots * swap_inputs.get(ccy, 0)
                         for ccy, w in s_pat.items():
-                            lots = (side_notional * w) / (current_rates[ccy] * DEFAULT_LOT_SIZE[ccy])
+                            rate = current_rates.get(ccy, 0)
+                            if rate == 0: continue
+                            lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
                             daily_swap += lots * swap_inputs.get(ccy, 0)
                         
-                        # ★ここが修正ポイント: 計算結果がNaNならリストに入れない
-                        if np.isnan(daily_swap):
-                            continue
+                        if np.isnan(daily_swap) or daily_swap == 0: continue
 
                         valid_plans.append({"buy": b_pat, "sell": s_pat, "beta": net_beta, "swap": daily_swap})
                     except: continue
@@ -205,7 +218,6 @@ if st.button("🚀 計算スタート", type="primary"):
             valid_plans.sort(key=lambda x: x["swap"], reverse=True)
             best = valid_plans[0]
             
-            # ★ここが修正ポイント: 表示時にも安全策としてNaNチェックを入れる
             best_swap_val = best['swap']
             if np.isnan(best_swap_val): best_swap_val = 0
 
@@ -221,11 +233,15 @@ if st.button("🚀 計算スタート", type="primary"):
             orders = []
             side_notional = target_notional / 2
             for ccy, w in best['buy'].items():
-                lots = (side_notional * w) / (current_rates[ccy] * DEFAULT_LOT_SIZE[ccy])
-                orders.append({"売買": "買い", "通貨ペア": ccy, "比率": f"{w*100:.0f}%", "推奨ロット": round(lots, 2)})
+                rate = current_rates.get(ccy, 0)
+                if rate > 0:
+                    lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
+                    orders.append({"売買": "買い", "通貨ペア": ccy, "比率": f"{w*100:.0f}%", "推奨ロット": round(lots, 2)})
             for ccy, w in best['sell'].items():
-                lots = (side_notional * w) / (current_rates[ccy] * DEFAULT_LOT_SIZE[ccy])
-                orders.append({"売買": "売り", "通貨ペア": ccy, "比率": f"{w*100:.0f}%", "推奨ロット": round(lots, 2)})
+                rate = current_rates.get(ccy, 0)
+                if rate > 0:
+                    lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
+                    orders.append({"売買": "売り", "通貨ペア": ccy, "比率": f"{w*100:.0f}%", "推奨ロット": round(lots, 2)})
             st.dataframe(pd.DataFrame(orders), hide_index=True)
 
             # 5. グラフ描画
@@ -242,14 +258,12 @@ if st.button("🚀 計算スタート", type="primary"):
             total_pl = (daily_capital_pl + best_swap_val).cumsum()
             capital_only = daily_capital_pl.cumsum()
             
-            # 損益グラフ
             fig_bt = go.Figure()
             fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl.values, name='合計損益', line=dict(color='green', width=2)))
             fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only.values, name='為替損益のみ', line=dict(color='gray', dash='dot')))
             fig_bt.update_layout(title="📈 1年間の損益シミュレーション", height=400)
             st.plotly_chart(fig_bt, use_container_width=True)
 
-            # 相関グラフ
             buy_nav = (1 + buy_series).cumprod() * 100
             sell_nav = (1 + sell_series).cumprod() * 100
             
@@ -259,4 +273,6 @@ if st.button("🚀 計算スタート", type="primary"):
             fig_corr.update_layout(title="🤝 相関チェック (動きが同じならOK)", height=400)
             st.plotly_chart(fig_corr, use_container_width=True)
             
-            st.info(f"💡 **相関係数: {buy_series.corr(sell_series):.4f}** (1.0に近いほどリスクヘッジが効いています)")
+            corr = buy_series.corr(sell_series)
+            if np.isnan(corr): corr = 0.0 # NaN対策
+            st.info(f"💡 **相関係数: {corr:.4f}** (1.0に近いほどリスクヘッジが効いています)")
