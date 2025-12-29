@@ -10,7 +10,7 @@ import itertools
 st.set_page_config(page_title="S6戦略 自動最適化ツール", layout="wide")
 
 # --- 定数 ---
-# Yahoo Financeのシンボルと、内部で使う名前の対応表
+# 内部名称(キー)と、YahooFinanceでの検索用シンボル(バリュー)
 TICKER_MAP = {
     "USDJPY": "USDJPY=X", "MXNJPY": "MXNJPY=X", "PLNJPY": "PLNJPY=X",
     "CZKJPY": "CZKJPY=X", "CHFJPY": "CHFJPY=X", "ZARJPY": "ZARJPY=X",
@@ -32,53 +32,80 @@ DEFAULT_LOT_SIZE = {
 # --- 関数定義 ---
 
 @st.cache_data(ttl=3600)
-def fetch_data(tickers, days=365):
-    """データ取得 (ラベル名強制クリーニング版)"""
+def fetch_data(days=365):
+    """データ取得 (ラベル名強制マッチング版)"""
     try:
-        # データを取得
-        data = yf.download(tickers, period=f"{days}d", progress=False, auto_adjust=True)
+        # まとめてダウンロード (auto_adjust=Falseの方がFXでは安全な場合が多い)
+        symbols = list(TICKER_MAP.values())
+        data = yf.download(symbols, period=f"{days}d", progress=False, auto_adjust=False)
+        
         if data.empty: return None, {}, None
         
-        # ★重要修正: MultiIndex（2段組みの列名）を強制的に平坦化する
-        # 例: ('Close', 'USDJPY=X') → 'USDJPY=X'
-        df = data.copy()
-        if isinstance(df.columns, pd.MultiIndex):
-            # 'Close' または 'Adj Close' のレベルを探して取得
-            if 'Close' in df.columns.get_level_values(0):
-                df = df.xs('Close', axis=1, level=0)
-            elif 'Adj Close' in df.columns.get_level_values(0):
-                df = df.xs('Adj Close', axis=1, level=0)
-            else:
-                # それでもダメなら単純に最後のレベルを使う
-                df.columns = df.columns.get_level_values(-1)
-
-        # ★重要修正: 列名を強制的に内部名称(MXNJPY等)にリネームする
-        # これで後の計算がすべてシンプルになる
-        new_columns = {}
-        for col in df.columns:
-            # =X を削除し、大文字にする
-            clean_name = str(col).upper().replace("=X", "").replace("=x", "").strip()
-            # 対応表にある名前なら採用
-            if clean_name in TICKER_MAP:
-                new_columns[col] = clean_name
-            else:
-                # マップにない場合も、逆引きを試す
-                found = False
-                for internal_name, yahoo_symbol in TICKER_MAP.items():
-                    if yahoo_symbol == col:
-                        new_columns[col] = internal_name
-                        found = True
-                        break
-                if not found:
-                    new_columns[col] = clean_name # とりあえずそのまま
-
-        # 列名を変更
-        df = df.rename(columns=new_columns)
-
-        # データの穴埋め
-        df_filled = df.ffill().bfill()
+        # 'Close' データのみを抽出するロジック
+        df_close = pd.DataFrame()
         
-        # 最新レート取得
+        # カラムがMultiIndexかどうかで分岐
+        if isinstance(data.columns, pd.MultiIndex):
+            # ('Close', 'USDJPY=X') のような形から Close を探す
+            try:
+                # レベル0に 'Close' があるか確認
+                if 'Close' in data.columns.get_level_values(0):
+                    df_close = data['Close'].copy()
+                elif 'Adj Close' in data.columns.get_level_values(0):
+                    df_close = data['Adj Close'].copy()
+                else:
+                    # 最後のレベルを使う
+                    df_close = data.copy()
+                    df_close.columns = df_close.columns.droplevel(0)
+            except:
+                df_close = data.copy() # フォールバック
+        else:
+            # SingleIndexの場合
+            # 'Close' カラムがあればそれを使う、なければ全体
+            if 'Close' in data.columns:
+                 df_close = data[['Close']].copy()
+            else:
+                 df_close = data.copy()
+
+        # ここからが重要: カラム名を内部名称(USDJPY等)に強制変換する
+        # "USDJPY=X" -> "USDJPY"
+        # "Close_USDJPY=X" -> "USDJPY"
+        # どんな名前で来ても対応できるようにする
+        
+        final_df = pd.DataFrame(index=df_close.index)
+        
+        for col in df_close.columns:
+            col_str = str(col).upper() # 文字列化して大文字に
+            
+            # TICKER_MAP の中身と照合
+            matched_name = None
+            for internal_name, yahoo_symbol in TICKER_MAP.items():
+                # シンボル名(USDJPY=X) または 内部名(USDJPY) がカラム名に含まれていれば採用
+                search_key = yahoo_symbol.upper().replace("=X", "") # "USDJPY"
+                
+                if search_key in col_str:
+                    matched_name = internal_name
+                    break
+            
+            if matched_name:
+                final_df[matched_name] = df_close[col]
+
+        # データの欠損処理
+        if final_df.empty: return None, {}, None
+        
+        # 全部NaNの列は削除
+        final_df = final_df.dropna(axis=1, how='all')
+        
+        # 前後埋め
+        df_filled = final_df.ffill().bfill()
+        
+        # それでもNaNが残る行(全通貨休みの日など)は削除
+        df_filled = df_filled.dropna(how='all')
+
+        # データが消えすぎていないかチェック
+        if len(df_filled) < 10: return None, {}, None
+
+        # 最新レート
         latest_rates = df_filled.iloc[-1].to_dict()
         
         # リターン計算
@@ -89,14 +116,19 @@ def fetch_data(tickers, days=365):
         return None, {}, None
 
 def calculate_beta(asset_returns, benchmark_returns):
-    # インデックスを合わせて計算
+    # インデックス(日付)を合わせて計算
     common_idx = asset_returns.index.intersection(benchmark_returns.index)
+    
     if len(common_idx) < 10: return 0.0
     
     y = asset_returns.loc[common_idx]
     x = benchmark_returns.loc[common_idx]
     
+    # 分散が0の場合は0を返す(エラー回避)
+    if x.std() == 0 or y.std() == 0: return 0.0
+
     slope, _, _, _, _ = stats.linregress(x, y)
+    if np.isnan(slope): return 0.0
     return slope
 
 def generate_weights(n):
@@ -150,21 +182,17 @@ if st.button("🚀 計算スタート", type="primary"):
 
     with st.spinner("⏳ データ取得＆最適化計算中..."):
         # 1. データ取得
-        all_tickers = list(set(buy_candidates + sell_candidates + ["USDJPY"]))
-        yf_tickers = [TICKER_MAP[t] for t in all_tickers]
+        # 必要そうなデータをfetch_data内で全て取得・整理させる
+        df_returns, current_rates, df_prices = fetch_data(days=730) # 期間を長めにとって安定させる
         
-        # データ取得実行
-        df_returns, current_rates, df_prices = fetch_data(yf_tickers)
-        
-        if df_returns is None:
-            st.error("❌ データ取得エラー。Yahoo Financeに接続できませんでした。")
+        if df_returns is None or df_returns.empty:
+            st.error("❌ データ取得エラー。Yahoo Financeからデータを取得できませんでした。しばらく待ってから再試行してください。")
             st.stop()
             
-        # 2. β計算
+        # 2. β計算の準備
         betas = {}
-        # カラム名が既にきれいになっているので、そのまま使える
         if "USDJPY" not in df_returns.columns:
-            st.error(f"❌ USDJPYデータ不足 (取得できたデータ: {list(df_returns.columns)})")
+            st.error(f"❌ USDJPYのデータが取得できませんでした。(取得列: {list(df_returns.columns)})")
             st.stop()
             
         for col in df_returns.columns:
@@ -192,7 +220,7 @@ if st.button("🚀 計算スタート", type="primary"):
         
         # 探索ループ
         for b_pat in buy_combos:
-            # データの存在確認
+            # データがある通貨のみで計算
             if not all(ccy in betas for ccy in b_pat): continue
 
             b_beta = sum(betas.get(ccy, 0) * w for ccy, w in b_pat.items())
@@ -258,34 +286,47 @@ if st.button("🚀 計算スタート", type="primary"):
             # 5. グラフ描画
             st.markdown("---")
             
+            # グラフ用のデータを作成 (ここでもデータがあるかチェック)
             buy_series = pd.Series(0.0, index=df_returns.index)
+            valid_buy = True
             for ccy, w in best['buy'].items():
-                if ccy in df_returns.columns: buy_series += df_returns[ccy] * w
+                if ccy in df_returns.columns: 
+                    buy_series += df_returns[ccy] * w
+                else:
+                    valid_buy = False
+            
             sell_series = pd.Series(0.0, index=df_returns.index)
+            valid_sell = True
             for ccy, w in best['sell'].items():
-                if ccy in df_returns.columns: sell_series += df_returns[ccy] * w
+                if ccy in df_returns.columns: 
+                    sell_series += df_returns[ccy] * w
+                else:
+                    valid_sell = False
             
-            daily_capital_pl = (buy_series - sell_series) * side_notional
-            total_pl = (daily_capital_pl + best_swap_val).cumsum()
-            capital_only = daily_capital_pl.cumsum()
-            
-            # 損益グラフ
-            fig_bt = go.Figure()
-            fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl.values, name='合計損益', line=dict(color='green', width=2)))
-            fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only.values, name='為替損益のみ', line=dict(color='gray', dash='dot')))
-            fig_bt.update_layout(title="📈 1年間の損益シミュレーション", height=400)
-            st.plotly_chart(fig_bt, use_container_width=True)
+            if valid_buy and valid_sell:
+                daily_capital_pl = (buy_series - sell_series) * side_notional
+                total_pl = (daily_capital_pl + best_swap_val).cumsum()
+                capital_only = daily_capital_pl.cumsum()
+                
+                # 損益グラフ
+                fig_bt = go.Figure()
+                fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl.values, name='合計損益', line=dict(color='green', width=2)))
+                fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only.values, name='為替損益のみ', line=dict(color='gray', dash='dot')))
+                fig_bt.update_layout(title="📈 1年間の損益シミュレーション", height=400)
+                st.plotly_chart(fig_bt, use_container_width=True)
 
-            # 相関グラフ
-            buy_nav = (1 + buy_series).cumprod() * 100
-            sell_nav = (1 + sell_series).cumprod() * 100
-            
-            fig_corr = go.Figure()
-            fig_corr.add_trace(go.Scatter(x=buy_nav.index, y=buy_nav.values, name="買いバスケット", line=dict(color='blue')))
-            fig_corr.add_trace(go.Scatter(x=sell_nav.index, y=sell_nav.values, name="売りバスケット", line=dict(color='red')))
-            fig_corr.update_layout(title="🤝 相関チェック (動きが同じならOK)", height=400)
-            st.plotly_chart(fig_corr, use_container_width=True)
-            
-            corr = buy_series.corr(sell_series)
-            if np.isnan(corr): corr = 0.0
-            st.info(f"💡 **相関係数: {corr:.4f}** (1.0に近いほどリスクヘッジが効いています)")
+                # 相関グラフ
+                buy_nav = (1 + buy_series).cumprod() * 100
+                sell_nav = (1 + sell_series).cumprod() * 100
+                
+                fig_corr = go.Figure()
+                fig_corr.add_trace(go.Scatter(x=buy_nav.index, y=buy_nav.values, name="買いバスケット", line=dict(color='blue')))
+                fig_corr.add_trace(go.Scatter(x=sell_nav.index, y=sell_nav.values, name="売りバスケット", line=dict(color='red')))
+                fig_corr.update_layout(title="🤝 相関チェック (動きが同じならOK)", height=400)
+                st.plotly_chart(fig_corr, use_container_width=True)
+                
+                corr = buy_series.corr(sell_series)
+                if np.isnan(corr): corr = 0.0
+                st.info(f"💡 **相関係数: {corr:.4f}** (1.0に近いほどリスクヘッジが効いています)")
+            else:
+                st.warning("⚠️ 一部の通貨データの履歴不足により、グラフを描画できませんでした。")
