@@ -31,46 +31,72 @@ DEFAULT_LOT_SIZE = {
 
 @st.cache_data(ttl=3600)
 def fetch_data(days=1095):
-    """データ取得"""
+    """データ取得 (USDJPY救済機能付き)"""
     try:
         symbols = list(TICKER_MAP.values())
+        # 1. まとめてダウンロード
         data = yf.download(symbols, period=f"{days}d", progress=False, auto_adjust=False)
         
-        if data.empty: return None, {}, None
-        
-        df_close = pd.DataFrame()
-        if isinstance(data.columns, pd.MultiIndex):
-            try:
-                if 'Close' in data.columns.get_level_values(0):
-                    df_close = data['Close'].copy()
-                elif 'Adj Close' in data.columns.get_level_values(0):
-                    df_close = data['Adj Close'].copy()
-                else:
-                    df_close = data.copy()
-                    df_close.columns = df_close.columns.droplevel(0)
-            except:
-                df_close = data.copy()
-        else:
-            if 'Close' in data.columns:
-                 df_close = data[['Close']].copy()
-            else:
-                 df_close = data.copy()
+        # 2. データ整形関数（内部関数として定義）
+        def clean_yfinance_data(raw_data):
+            df_out = pd.DataFrame()
+            if raw_data.empty: return df_out
 
-        final_df = pd.DataFrame(index=df_close.index)
-        for col in df_close.columns:
-            col_str = str(col).upper()
-            matched_name = None
-            for internal_name, yahoo_symbol in TICKER_MAP.items():
-                search_key = yahoo_symbol.upper().replace("=X", "")
-                if search_key in col_str:
-                    matched_name = internal_name
-                    break
-            if matched_name:
-                final_df[matched_name] = df_close[col]
+            # 構造の平坦化
+            df_temp = pd.DataFrame()
+            if isinstance(raw_data.columns, pd.MultiIndex):
+                try:
+                    if 'Close' in raw_data.columns.get_level_values(0):
+                        df_temp = raw_data['Close'].copy()
+                    elif 'Adj Close' in raw_data.columns.get_level_values(0):
+                        df_temp = raw_data['Adj Close'].copy()
+                    else:
+                        df_temp = raw_data.copy()
+                        df_temp.columns = df_temp.columns.droplevel(0)
+                except:
+                    df_temp = raw_data.copy()
+            else:
+                if 'Close' in raw_data.columns:
+                     df_temp = raw_data[['Close']].copy()
+                else:
+                     df_temp = raw_data.copy()
+
+            # カラム名のマッピング
+            for col in df_temp.columns:
+                col_str = str(col).upper()
+                matched_name = None
+                for internal_name, yahoo_symbol in TICKER_MAP.items():
+                    search_key = yahoo_symbol.upper().replace("=X", "")
+                    if search_key in col_str:
+                        matched_name = internal_name
+                        break
+                if matched_name:
+                    df_out[matched_name] = df_temp[col]
+            
+            return df_out
+
+        final_df = clean_yfinance_data(data)
+
+        # 3. ★重要: USDJPYが取れていなかった場合の救済措置
+        if "USDJPY" not in final_df.columns:
+            try:
+                # USDJPYだけ単独で取りに行く
+                usd_data = yf.download("USDJPY=X", period=f"{days}d", progress=False, auto_adjust=False)
+                usd_clean = clean_yfinance_data(usd_data)
+                
+                if "USDJPY" in usd_clean.columns:
+                    # メインのデータフレームに結合
+                    final_df = final_df.join(usd_clean["USDJPY"], how='outer')
+            except Exception:
+                pass # それでもダメなら諦める
 
         if final_df.empty: return None, {}, None
+        
+        # 全てNaNの列を削除
         final_df = final_df.dropna(axis=1, how='all')
+        # 前後埋め
         df_filled = final_df.ffill().bfill()
+        # 全てNaNの行を削除
         df_filled = df_filled.dropna(how='all')
 
         if len(df_filled) < 10: return None, {}, None
@@ -116,7 +142,6 @@ def generate_weights(n):
 with st.sidebar:
     st.header("⚙️ 設定パネル")
     
-    # ★変更点: パスワード入力によるモード分岐
     password = st.text_input("🔑 パスワード (未入力でデモモード)", type="password")
     
     if password == "s6secret":
@@ -129,7 +154,6 @@ with st.sidebar:
     capital = st.number_input("💰 運用資金 (円)", value=1000000, step=100000)
     leverage = st.number_input("⚙️ 目標レバレッジ (倍)", value=16.0, step=0.1)
 
-    # ★変更点: スワップ設定をここ（上の方）に移動
     with st.expander("📝 スワップポイント設定", expanded=False):
         swap_inputs = {}
         for ccy, val in DEFAULT_SWAP.items():
@@ -166,16 +190,13 @@ with st.sidebar:
 # --- メイン画面 ---
 st.title("📱 S6戦略 自動最適化ツール")
 
-# ★変更点: モードに応じた通貨ペア候補の切り替え
 if is_demo_mode:
     st.warning("🚧 現在は**デモモード**です。選択できる通貨ペアが制限されています。フル機能を使うにはサイドバーでパスワードを入力してください。")
-    # デモ用の候補 (TRY, MXN買い / USD売り)
     buy_options = ["MXNJPY", "TRYJPY"]
     buy_default = ["MXNJPY", "TRYJPY"]
     sell_options = ["USDJPY"]
     sell_default = ["USDJPY"]
 else:
-    # フル機能用の候補 (全通貨)
     buy_options = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY"]
     buy_default = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY"]
     sell_options = ["USDJPY", "CHFJPY", "EURJPY"]
@@ -209,112 +230,114 @@ if st.button("🚀 計算スタート", type="primary"):
             
             df_calc = df_full.tail(calc_days)
             
-            betas = {}
+            # --- ここで USDJPY があるか最終チェック ---
             if "USDJPY" not in df_calc.columns:
-                st.error(f"❌ USDJPYデータ不足 (取得列: {list(df_calc.columns)})")
-            else:
-                for col in df_calc.columns:
-                    if col == "USDJPY": betas[col] = 1.0
-                    else: betas[col] = calculate_beta(df_calc[col], df_calc["USDJPY"])
-                
-                target_notional = capital * leverage
-                valid_plans = []
+                st.error(f"❌ USDJPYのデータ取得に失敗しました。時間をおいて再試行してください。(取得できた列: {list(df_calc.columns)})")
+                st.stop()
 
-                # --- 組み合わせ生成 & 事前計算 ---
-                # 1. 買い
-                buy_precalc = []
-                for size in range(buy_count_range[0], min(buy_count_range[1], len(buy_candidates)) + 1):
-                    for combo in itertools.combinations(buy_candidates, size):
-                        if not all(ccy in betas for ccy in combo): continue
-                        weights_list = generate_weights(size)
-                        for wp in weights_list:
-                            pattern = {combo[i]: wp[i] for i in range(size)}
-                            
-                            is_valid_weight = True
-                            for ccy, weight in pattern.items():
-                                if ccy == "TRYJPY":
-                                    if weight > (try_limit / 100): is_valid_weight = False; break
-                                else:
-                                    if weight > (other_limit / 100): is_valid_weight = False; break
-                            if not is_valid_weight: continue
+            betas = {}
+            for col in df_calc.columns:
+                if col == "USDJPY": betas[col] = 1.0
+                else: betas[col] = calculate_beta(df_calc[col], df_calc["USDJPY"])
+            
+            target_notional = capital * leverage
+            valid_plans = []
 
-                            b_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items())
-                            b_series = pd.Series(0.0, index=df_calc.index)
-                            for ccy, w in pattern.items(): b_series += df_calc[ccy] * w
-                            
-                            daily_swap_buy = 0
-                            valid_swap = True
-                            side_notional = target_notional / 2
-                            try:
-                                for ccy, w in pattern.items():
-                                    rate = current_rates.get(ccy, 0)
-                                    if rate == 0: valid_swap = False; break
-                                    lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
-                                    daily_swap_buy += lots * swap_inputs.get(ccy, 0)
-                            except: valid_swap = False
-                            
-                            if valid_swap:
-                                buy_precalc.append({
-                                    "pattern": pattern, "beta": b_beta, "series": b_series, "swap": daily_swap_buy
-                                })
-
-                # 2. 売り
-                sell_precalc = []
-                for size in range(sell_count_range[0], min(sell_count_range[1], len(sell_candidates)) + 1):
-                    for combo in itertools.combinations(sell_candidates, size):
-                        if not all(ccy in betas for ccy in combo): continue
-                        weights_list = generate_weights(size)
-                        for wp in weights_list:
-                            pattern = {combo[i]: wp[i] for i in range(size)}
-                            s_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items()) * -1
-                            s_series = pd.Series(0.0, index=df_calc.index)
-                            for ccy, w in pattern.items(): s_series += df_calc[ccy] * w
-                            
-                            daily_swap_sell = 0
-                            valid_swap = True
-                            side_notional = target_notional / 2
-                            try:
-                                for ccy, w in pattern.items():
-                                    rate = current_rates.get(ccy, 0)
-                                    if rate == 0: valid_swap = False; break
-                                    lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
-                                    daily_swap_sell += lots * swap_inputs.get(ccy, 0)
-                            except: valid_swap = False
-
-                            if valid_swap:
-                                sell_precalc.append({
-                                    "pattern": pattern, "beta": s_beta, "series": s_series, "swap": daily_swap_sell
-                                })
-
-                # 3. マッチング
-                for b_item in buy_precalc:
-                    for s_item in sell_precalc:
-                        net_beta = b_item["beta"] + s_item["beta"]
-                        if abs(net_beta) >= target_beta: continue
-                        corr = b_item["series"].corr(s_item["series"])
-                        if np.isnan(corr): corr = 0
-                        if corr < target_corr: continue
+            # --- 組み合わせ生成 & 事前計算 ---
+            # 1. 買い
+            buy_precalc = []
+            for size in range(buy_count_range[0], min(buy_count_range[1], len(buy_candidates)) + 1):
+                for combo in itertools.combinations(buy_candidates, size):
+                    if not all(ccy in betas for ccy in combo): continue
+                    weights_list = generate_weights(size)
+                    for wp in weights_list:
+                        pattern = {combo[i]: wp[i] for i in range(size)}
                         
-                        valid_plans.append({
-                            "buy": b_item["pattern"], "sell": s_item["pattern"],
-                            "beta": net_beta, "swap": b_item["swap"] + s_item["swap"], "corr": corr
-                        })
+                        is_valid_weight = True
+                        for ccy, weight in pattern.items():
+                            if ccy == "TRYJPY":
+                                if weight > (try_limit / 100): is_valid_weight = False; break
+                            else:
+                                if weight > (other_limit / 100): is_valid_weight = False; break
+                        if not is_valid_weight: continue
 
-                if not valid_plans:
-                    st.error(f"❌ 条件に合うプランが見つかりませんでした。\n(β < {target_beta}, 相関 > {target_corr})")
-                    if 'results' in st.session_state: del st.session_state['results']
-                else:
-                    valid_plans.sort(key=lambda x: x["swap"], reverse=True)
-                    best = valid_plans[0]
+                        b_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items())
+                        b_series = pd.Series(0.0, index=df_calc.index)
+                        for ccy, w in pattern.items(): b_series += df_calc[ccy] * w
+                        
+                        daily_swap_buy = 0
+                        valid_swap = True
+                        side_notional = target_notional / 2
+                        try:
+                            for ccy, w in pattern.items():
+                                rate = current_rates.get(ccy, 0)
+                                if rate == 0: valid_swap = False; break
+                                lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
+                                daily_swap_buy += lots * swap_inputs.get(ccy, 0)
+                        except: valid_swap = False
+                        
+                        if valid_swap:
+                            buy_precalc.append({
+                                "pattern": pattern, "beta": b_beta, "series": b_series, "swap": daily_swap_buy
+                            })
+
+            # 2. 売り
+            sell_precalc = []
+            for size in range(sell_count_range[0], min(sell_count_range[1], len(sell_candidates)) + 1):
+                for combo in itertools.combinations(sell_candidates, size):
+                    if not all(ccy in betas for ccy in combo): continue
+                    weights_list = generate_weights(size)
+                    for wp in weights_list:
+                        pattern = {combo[i]: wp[i] for i in range(size)}
+                        s_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items()) * -1
+                        s_series = pd.Series(0.0, index=df_calc.index)
+                        for ccy, w in pattern.items(): s_series += df_calc[ccy] * w
+                        
+                        daily_swap_sell = 0
+                        valid_swap = True
+                        side_notional = target_notional / 2
+                        try:
+                            for ccy, w in pattern.items():
+                                rate = current_rates.get(ccy, 0)
+                                if rate == 0: valid_swap = False; break
+                                lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
+                                daily_swap_sell += lots * swap_inputs.get(ccy, 0)
+                        except: valid_swap = False
+
+                        if valid_swap:
+                            sell_precalc.append({
+                                "pattern": pattern, "beta": s_beta, "series": s_series, "swap": daily_swap_sell
+                            })
+
+            # 3. マッチング
+            for b_item in buy_precalc:
+                for s_item in sell_precalc:
+                    net_beta = b_item["beta"] + s_item["beta"]
+                    if abs(net_beta) >= target_beta: continue
+                    corr = b_item["series"].corr(s_item["series"])
+                    if np.isnan(corr): corr = 0
+                    if corr < target_corr: continue
                     
-                    st.session_state['results'] = {
-                        'best': best,
-                        'df_full': df_full,
-                        'calc_period': calc_period_option,
-                        'target_notional': target_notional,
-                        'capital': capital,
-                        'current_rates': current_rates
-                    }
+                    valid_plans.append({
+                        "buy": b_item["pattern"], "sell": s_item["pattern"],
+                        "beta": net_beta, "swap": b_item["swap"] + s_item["swap"], "corr": corr
+                    })
+
+            if not valid_plans:
+                st.error(f"❌ 条件に合うプランが見つかりませんでした。\n(β < {target_beta}, 相関 > {target_corr})")
+                if 'results' in st.session_state: del st.session_state['results']
+            else:
+                valid_plans.sort(key=lambda x: x["swap"], reverse=True)
+                best = valid_plans[0]
+                
+                st.session_state['results'] = {
+                    'best': best,
+                    'df_full': df_full,
+                    'calc_period': calc_period_option,
+                    'target_notional': target_notional,
+                    'capital': capital,
+                    'current_rates': current_rates
+                }
 
 # --- 結果表示 ---
 if 'results' in st.session_state:
