@@ -31,33 +31,43 @@ DEFAULT_LOT_SIZE = {
 
 @st.cache_data(ttl=3600)
 def fetch_data(days=1095):
-    """データ取得 (USDJPY救済機能付き)"""
+    """データ取得 (USDJPY強制認識版)"""
+    debug_logs = [] # デバッグ用ログ
+    
     try:
         symbols = list(TICKER_MAP.values())
-        # 1. まとめてダウンロード
-        data = yf.download(symbols, period=f"{days}d", progress=False, auto_adjust=False)
         
-        # 2. データ整形関数（内部関数として定義）
+        # 1. まとめてダウンロード
+        # auto_adjust=False にして Close を確実に取る
+        data = yf.download(symbols, period=f"{days}d", progress=False, auto_adjust=False)
+        debug_logs.append(f"Bulk Download Shape: {data.shape}")
+        debug_logs.append(f"Bulk Columns: {data.columns}")
+
+        # 2. データ整形関数
         def clean_yfinance_data(raw_data):
             df_out = pd.DataFrame()
             if raw_data.empty: return df_out
 
-            # 構造の平坦化
+            # 構造の平坦化: Close または Adj Close を探す
             df_temp = pd.DataFrame()
+            
+            # MultiIndexの場合
             if isinstance(raw_data.columns, pd.MultiIndex):
-                try:
-                    if 'Close' in raw_data.columns.get_level_values(0):
-                        df_temp = raw_data['Close'].copy()
-                    elif 'Adj Close' in raw_data.columns.get_level_values(0):
-                        df_temp = raw_data['Adj Close'].copy()
-                    else:
-                        df_temp = raw_data.copy()
-                        df_temp.columns = df_temp.columns.droplevel(0)
-                except:
+                # レベル0に Close があるか
+                if 'Close' in raw_data.columns.get_level_values(0):
+                    df_temp = raw_data['Close'].copy()
+                elif 'Adj Close' in raw_data.columns.get_level_values(0):
+                    df_temp = raw_data['Adj Close'].copy()
+                else:
+                    # レベルが不明なら単純にDroplevel
                     df_temp = raw_data.copy()
+                    df_temp.columns = df_temp.columns.droplevel(0)
             else:
+                # SingleIndexの場合
                 if 'Close' in raw_data.columns:
                      df_temp = raw_data[['Close']].copy()
+                elif 'Adj Close' in raw_data.columns:
+                     df_temp = raw_data[['Adj Close']].copy()
                 else:
                      df_temp = raw_data.copy()
 
@@ -66,6 +76,7 @@ def fetch_data(days=1095):
                 col_str = str(col).upper()
                 matched_name = None
                 for internal_name, yahoo_symbol in TICKER_MAP.items():
+                    # シンボル名(USDJPY=X)の一部が含まれていればOK
                     search_key = yahoo_symbol.upper().replace("=X", "")
                     if search_key in col_str:
                         matched_name = internal_name
@@ -77,36 +88,52 @@ def fetch_data(days=1095):
 
         final_df = clean_yfinance_data(data)
 
-        # 3. ★重要: USDJPYが取れていなかった場合の救済措置
+        # 3. ★最強の救済措置: USDJPYがない場合
         if "USDJPY" not in final_df.columns:
+            debug_logs.append("USDJPY missing in bulk. Attempting rescue...")
             try:
-                # USDJPYだけ単独で取りに行く
+                # 単独で取りに行く
                 usd_data = yf.download("USDJPY=X", period=f"{days}d", progress=False, auto_adjust=False)
-                usd_clean = clean_yfinance_data(usd_data)
+                debug_logs.append(f"Rescue Download Shape: {usd_data.shape}")
                 
-                if "USDJPY" in usd_clean.columns:
-                    # メインのデータフレームに結合
-                    final_df = final_df.join(usd_clean["USDJPY"], how='outer')
-            except Exception:
-                pass # それでもダメなら諦める
+                if not usd_data.empty:
+                    # ★ここが修正点: 列名チェックをせず、強制的にデータを使う
+                    # 単独取得の場合、MultiIndexかSeriesか予測しづらいため
+                    # 「とにかく最初の列」をUSDJPYとして扱う
+                    if isinstance(usd_data, pd.DataFrame):
+                        # Close列を探すが、なければ1列目を使う
+                        if 'Close' in usd_data.columns:
+                            usd_series = usd_data['Close']
+                        elif isinstance(usd_data.columns, pd.MultiIndex) and 'Close' in usd_data.columns.get_level_values(0):
+                             usd_series = usd_data['Close'].iloc[:, 0] # Closeの中の最初の列
+                        else:
+                            usd_series = usd_data.iloc[:, 0]
+                    else:
+                        usd_series = usd_data # Seriesの場合
+                    
+                    usd_series.name = "USDJPY" # 名前を強制書き換え
+                    
+                    # 結合
+                    final_df = final_df.join(usd_series, how='outer')
+                    debug_logs.append("Rescue successful. USDJPY joined.")
+            except Exception as e:
+                debug_logs.append(f"Rescue failed: {str(e)}")
 
-        if final_df.empty: return None, {}, None
+        if final_df.empty: return None, {}, None, debug_logs
         
-        # 全てNaNの列を削除
         final_df = final_df.dropna(axis=1, how='all')
-        # 前後埋め
         df_filled = final_df.ffill().bfill()
-        # 全てNaNの行を削除
         df_filled = df_filled.dropna(how='all')
 
-        if len(df_filled) < 10: return None, {}, None
+        if len(df_filled) < 10: return None, {}, None, debug_logs
 
         latest_rates = df_filled.iloc[-1].to_dict()
         returns = np.log(df_filled).diff().dropna()
         
-        return returns, latest_rates, df_filled
+        return returns, latest_rates, df_filled, debug_logs
     except Exception as e:
-        return None, {}, None
+        debug_logs.append(f"Fatal Error: {str(e)}")
+        return None, {}, None, debug_logs
 
 def calculate_beta(asset_returns, benchmark_returns):
     common_idx = asset_returns.index.intersection(benchmark_returns.index)
@@ -216,10 +243,14 @@ if st.button("🚀 計算スタート", type="primary"):
         st.stop()
 
     with st.spinner("⏳ データ取得＆最適化計算中..."):
-        df_full, current_rates, df_prices = fetch_data(days=1095)
+        # デバッグログを受け取る
+        df_full, current_rates, df_prices, debug_logs = fetch_data(days=1095)
         
         if df_full is None or df_full.empty:
-            st.error("❌ データ取得エラー。")
+            st.error("❌ データ取得エラー。以下のデバッグ情報を確認してください。")
+            with st.expander("🛠️ デバッグ情報"):
+                for log in debug_logs:
+                    st.write(log)
         else:
             if "1年" in calc_period_option:
                 calc_days = 250
@@ -233,6 +264,10 @@ if st.button("🚀 計算スタート", type="primary"):
             # --- ここで USDJPY があるか最終チェック ---
             if "USDJPY" not in df_calc.columns:
                 st.error(f"❌ USDJPYのデータ取得に失敗しました。時間をおいて再試行してください。(取得できた列: {list(df_calc.columns)})")
+                with st.expander("🛠️ デバッグ情報 (なぜ取れなかったか)"):
+                    for log in debug_logs:
+                        st.write(log)
+                    st.write("Current Columns:", df_full.columns)
                 st.stop()
 
             betas = {}
