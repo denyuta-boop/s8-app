@@ -30,8 +30,8 @@ DEFAULT_LOT_SIZE = {
 # --- 関数定義 ---
 
 @st.cache_data(ttl=3600)
-def fetch_data(days=365):
-    """データ取得 (超・堅牢版)"""
+def fetch_data(days=730):
+    """データ取得 (デフォルト2年分)"""
     try:
         symbols = list(TICKER_MAP.values())
         data = yf.download(symbols, period=f"{days}d", progress=False, auto_adjust=False)
@@ -132,9 +132,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption("通貨保有比率の制限")
     
-    # ★追加: 一般通貨の制限
-    other_limit = st.slider("🌍 TRY以外の最大比率制限 (%)", 30, 100, 70, step=10, help="特定の通貨(ZARなど)に資金が集中するのを防ぎます。例えば70%にすると、必ず30%は他の通貨を持つことになり、分散が強制されます。")
-    # TRY制限
+    other_limit = st.slider("🌍 TRY以外の最大比率制限 (%)", 30, 100, 70, step=10, help="特定の通貨への集中を防ぎます。")
     try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 100, step=10)
     
     st.subheader("🔢 構成通貨数")
@@ -166,6 +164,7 @@ if st.button("🚀 計算スタート", type="primary"):
         st.stop()
 
     with st.spinner("⏳ データ取得＆最適化計算中..."):
+        # グラフ表示に合わせて2年分(730日)を取得
         df_returns, current_rates, df_prices = fetch_data(days=730)
         
         if df_returns is None or df_returns.empty:
@@ -196,29 +195,22 @@ if st.button("🚀 計算スタート", type="primary"):
                 for wp in weights_list:
                     pattern = {combo[i]: wp[i] for i in range(size)}
                     
-                    # ★追加: 保有比率制限のチェック
+                    # 保有比率制限
                     is_valid_weight = True
                     for ccy, weight in pattern.items():
-                        # TRYの場合
                         if ccy == "TRYJPY":
-                            if weight > (try_limit / 100):
-                                is_valid_weight = False; break
-                        # その他の通貨の場合
+                            if weight > (try_limit / 100): is_valid_weight = False; break
                         else:
-                            if weight > (other_limit / 100):
-                                is_valid_weight = False; break
+                            if weight > (other_limit / 100): is_valid_weight = False; break
                     
                     if not is_valid_weight: continue
 
-                    # β計算
                     b_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items())
                     
-                    # 時系列データ計算
                     b_series = pd.Series(0.0, index=df_returns.index)
                     for ccy, w in pattern.items():
                          b_series += df_returns[ccy] * w
                     
-                    # スワップ計算
                     daily_swap_buy = 0
                     valid_swap = True
                     side_notional = target_notional / 2
@@ -276,11 +268,9 @@ if st.button("🚀 計算スタート", type="primary"):
         for b_item in buy_precalc:
             for s_item in sell_precalc:
                 
-                # βチェック
                 net_beta = b_item["beta"] + s_item["beta"]
                 if abs(net_beta) >= target_beta: continue
                 
-                # 相関チェック
                 corr = b_item["series"].corr(s_item["series"])
                 if np.isnan(corr): corr = 0
                 if corr < target_corr: continue
@@ -329,6 +319,7 @@ if st.button("🚀 計算スタート", type="primary"):
 
             st.markdown("---")
             
+            # グラフ描画
             buy_series = pd.Series(0.0, index=df_returns.index)
             for ccy, w in best['buy'].items():
                  buy_series += df_returns[ccy] * w
@@ -344,7 +335,8 @@ if st.button("🚀 計算スタート", type="primary"):
             fig_bt = go.Figure()
             fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl.values, name='合計損益', line=dict(color='green', width=2)))
             fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only.values, name='為替損益のみ', line=dict(color='gray', dash='dot')))
-            fig_bt.update_layout(title="📈 1年間の損益シミュレーション", height=400)
+            # ★ここを修正しました
+            fig_bt.update_layout(title="📈 過去2年間の損益シミュレーション (バックテスト)", height=400)
             st.plotly_chart(fig_bt, use_container_width=True)
 
             buy_nav = (1 + buy_series).cumprod() * 100
