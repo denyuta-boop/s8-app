@@ -5,6 +5,7 @@ import yfinance as yf
 from scipy import stats
 import plotly.graph_objects as go
 import itertools
+import time  # ★追加: 待機時間を作るため
 
 # --- ページ設定 ---
 st.set_page_config(page_title="S6戦略 自動最適化ツール", layout="wide")
@@ -31,73 +32,95 @@ DEFAULT_LOT_SIZE = {
 
 @st.cache_data(ttl=3600)
 def fetch_data(days=1095):
-    """データ取得 (USDJPY VIP分離取得版)"""
+    """データ取得 (執念のリトライ機能付き)"""
     debug_logs = []
     
     try:
-        # 1. USDJPYを単独で確実に取る (VIP待遇)
+        # 1. USDJPYを単独で確実に取る (VIP待遇 + リトライ)
         usd_symbol = "USDJPY=X"
         other_symbols = [v for k, v in TICKER_MAP.items() if v != usd_symbol]
         
-        # --- USDJPY 取得 ---
-        data_usd = yf.download(usd_symbol, period=f"{days}d", progress=False, auto_adjust=False)
-        
-        # USDJPYの整形
+        # --- USDJPY 取得 (最大3回チャレンジ) ---
         df_usd_clean = pd.DataFrame()
-        if not data_usd.empty:
-            if isinstance(data_usd, pd.DataFrame):
-                target_col = None
-                if 'Close' in data_usd.columns:
-                    target_col = data_usd['Close']
-                elif 'Adj Close' in data_usd.columns:
-                    target_col = data_usd['Adj Close']
-                elif isinstance(data_usd.columns, pd.MultiIndex):
-                     try:
-                         target_col = data_usd.xs('Close', axis=1, level=0).iloc[:, 0]
-                     except:
-                         target_col = data_usd.iloc[:, 0]
-                else:
-                    target_col = data_usd.iloc[:, 0]
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                # auto_adjust=False はデータの欠損を防ぐのに有効
+                data_usd = yf.download(usd_symbol, period=f"{days}d", progress=False, auto_adjust=False)
                 
-                if target_col is not None:
-                    df_usd_clean["USDJPY"] = target_col
+                if not data_usd.empty:
+                    # データ整形
+                    target_col = None
+                    if isinstance(data_usd, pd.DataFrame):
+                        if 'Close' in data_usd.columns:
+                            target_col = data_usd['Close']
+                        elif 'Adj Close' in data_usd.columns:
+                            target_col = data_usd['Adj Close']
+                        elif isinstance(data_usd.columns, pd.MultiIndex):
+                             try:
+                                 target_col = data_usd.xs('Close', axis=1, level=0).iloc[:, 0]
+                             except:
+                                 target_col = data_usd.iloc[:, 0]
+                        else:
+                            target_col = data_usd.iloc[:, 0]
+                    
+                    if target_col is not None:
+                        df_usd_clean["USDJPY"] = target_col
+                        debug_logs.append(f"USDJPY fetched successfully on attempt {attempt+1}")
+                        break # 成功したらループを抜ける
+            except Exception as e:
+                debug_logs.append(f"Attempt {attempt+1} failed: {str(e)}")
+            
+            # 失敗したら1秒待つ
+            time.sleep(1)
 
         if df_usd_clean.empty:
-            debug_logs.append("Critical Error: Failed to fetch USDJPY standalone.")
+            debug_logs.append("Critical Error: Failed to fetch USDJPY after retries.")
             return None, {}, None, debug_logs
 
-        # --- その他通貨 取得 ---
-        data_others = yf.download(other_symbols, period=f"{days}d", progress=False, auto_adjust=False)
-        
-        # その他通貨の整形
+        # --- その他通貨 取得 (こちらもリトライ) ---
         df_others_clean = pd.DataFrame()
-        if not data_others.empty:
-            df_temp = pd.DataFrame()
-            if isinstance(data_others.columns, pd.MultiIndex):
-                if 'Close' in data_others.columns.get_level_values(0):
-                    df_temp = data_others['Close'].copy()
-                elif 'Adj Close' in data_others.columns.get_level_values(0):
-                    df_temp = data_others['Adj Close'].copy()
-                else:
-                    df_temp = data_others.copy()
-                    df_temp.columns = df_temp.columns.droplevel(0)
-            else:
-                if 'Close' in data_others.columns:
-                     df_temp = data_others[['Close']].copy()
-                else:
-                     df_temp = data_others.copy()
+        
+        for attempt in range(max_retries):
+            try:
+                data_others = yf.download(other_symbols, period=f"{days}d", progress=False, auto_adjust=False)
+                
+                if not data_others.empty:
+                    # データ整形
+                    df_temp = pd.DataFrame()
+                    if isinstance(data_others.columns, pd.MultiIndex):
+                        if 'Close' in data_others.columns.get_level_values(0):
+                            df_temp = data_others['Close'].copy()
+                        elif 'Adj Close' in data_others.columns.get_level_values(0):
+                            df_temp = data_others['Adj Close'].copy()
+                        else:
+                            df_temp = data_others.copy()
+                            df_temp.columns = df_temp.columns.droplevel(0)
+                    else:
+                        if 'Close' in data_others.columns:
+                             df_temp = data_others[['Close']].copy()
+                        else:
+                             df_temp = data_others.copy()
 
-            for col in df_temp.columns:
-                col_str = str(col).upper()
-                matched_name = None
-                for internal_name, yahoo_symbol in TICKER_MAP.items():
-                    if internal_name == "USDJPY": continue
-                    search_key = yahoo_symbol.upper().replace("=X", "")
-                    if search_key in col_str:
-                        matched_name = internal_name
-                        break
-                if matched_name:
-                    df_others_clean[matched_name] = df_temp[col]
+                    for col in df_temp.columns:
+                        col_str = str(col).upper()
+                        matched_name = None
+                        for internal_name, yahoo_symbol in TICKER_MAP.items():
+                            if internal_name == "USDJPY": continue
+                            search_key = yahoo_symbol.upper().replace("=X", "")
+                            if search_key in col_str:
+                                matched_name = internal_name
+                                break
+                        if matched_name:
+                            df_others_clean[matched_name] = df_temp[col]
+                    
+                    debug_logs.append(f"Other pairs fetched successfully on attempt {attempt+1}")
+                    break
+            except Exception as e:
+                 debug_logs.append(f"Others Attempt {attempt+1} failed: {str(e)}")
+            
+            time.sleep(1)
 
         # --- 合体 (Merge) ---
         final_df = df_usd_clean.join(df_others_clean, how='outer')
@@ -258,7 +281,7 @@ if st.button("🚀 計算スタート", type="primary"):
             
             target_notional = capital * leverage
             valid_plans = []
-            fallback_plans = [] # ★敗者復活用のリスト
+            fallback_plans = []
 
             # --- 組み合わせ生成 & 事前計算 ---
             # 1. 買い
@@ -354,7 +377,7 @@ if st.button("🚀 計算スタート", type="primary"):
                 valid_plans.sort(key=lambda x: x["swap"], reverse=True)
                 final_best = valid_plans[0]
             elif fallback_plans:
-                # ★修正: βの絶対値が小さい(0に近い)順に並べ替え、第2キーでスワップ
+                # 敗者復活: β絶対値優先、次にスワップ
                 fallback_plans.sort(key=lambda x: (abs(x["beta"]), -x["swap"]))
                 final_best = fallback_plans[0]
                 is_fallback = True
