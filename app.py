@@ -10,14 +10,12 @@ import itertools
 st.set_page_config(page_title="S6戦略 自動最適化ツール", layout="wide")
 
 # --- 定数 ---
-# 内部名称(キー)と、YahooFinanceでの検索用シンボル(バリュー)
 TICKER_MAP = {
     "USDJPY": "USDJPY=X", "MXNJPY": "MXNJPY=X", "PLNJPY": "PLNJPY=X",
     "CZKJPY": "CZKJPY=X", "CHFJPY": "CHFJPY=X", "ZARJPY": "ZARJPY=X",
     "TRYJPY": "TRYJPY=X", "EURJPY": "EURJPY=X"
 }
 
-# 初期スワップ値
 DEFAULT_SWAP = {
     "MXNJPY": 15.5, "PLNJPY": 42.0, "ZARJPY": 16.1, "TRYJPY": 30.1,
     "CZKJPY": 10.0,
@@ -33,82 +31,51 @@ DEFAULT_LOT_SIZE = {
 
 @st.cache_data(ttl=3600)
 def fetch_data(days=365):
-    """データ取得 (ラベル名強制マッチング版)"""
+    """データ取得 (超・堅牢版)"""
     try:
-        # まとめてダウンロード (auto_adjust=Falseの方がFXでは安全な場合が多い)
         symbols = list(TICKER_MAP.values())
         data = yf.download(symbols, period=f"{days}d", progress=False, auto_adjust=False)
         
         if data.empty: return None, {}, None
         
-        # 'Close' データのみを抽出するロジック
         df_close = pd.DataFrame()
-        
-        # カラムがMultiIndexかどうかで分岐
         if isinstance(data.columns, pd.MultiIndex):
-            # ('Close', 'USDJPY=X') のような形から Close を探す
             try:
-                # レベル0に 'Close' があるか確認
                 if 'Close' in data.columns.get_level_values(0):
                     df_close = data['Close'].copy()
                 elif 'Adj Close' in data.columns.get_level_values(0):
                     df_close = data['Adj Close'].copy()
                 else:
-                    # 最後のレベルを使う
                     df_close = data.copy()
                     df_close.columns = df_close.columns.droplevel(0)
             except:
-                df_close = data.copy() # フォールバック
+                df_close = data.copy()
         else:
-            # SingleIndexの場合
-            # 'Close' カラムがあればそれを使う、なければ全体
             if 'Close' in data.columns:
                  df_close = data[['Close']].copy()
             else:
                  df_close = data.copy()
 
-        # ここからが重要: カラム名を内部名称(USDJPY等)に強制変換する
-        # "USDJPY=X" -> "USDJPY"
-        # "Close_USDJPY=X" -> "USDJPY"
-        # どんな名前で来ても対応できるようにする
-        
         final_df = pd.DataFrame(index=df_close.index)
-        
         for col in df_close.columns:
-            col_str = str(col).upper() # 文字列化して大文字に
-            
-            # TICKER_MAP の中身と照合
+            col_str = str(col).upper()
             matched_name = None
             for internal_name, yahoo_symbol in TICKER_MAP.items():
-                # シンボル名(USDJPY=X) または 内部名(USDJPY) がカラム名に含まれていれば採用
-                search_key = yahoo_symbol.upper().replace("=X", "") # "USDJPY"
-                
+                search_key = yahoo_symbol.upper().replace("=X", "")
                 if search_key in col_str:
                     matched_name = internal_name
                     break
-            
             if matched_name:
                 final_df[matched_name] = df_close[col]
 
-        # データの欠損処理
         if final_df.empty: return None, {}, None
-        
-        # 全部NaNの列は削除
         final_df = final_df.dropna(axis=1, how='all')
-        
-        # 前後埋め
         df_filled = final_df.ffill().bfill()
-        
-        # それでもNaNが残る行(全通貨休みの日など)は削除
         df_filled = df_filled.dropna(how='all')
 
-        # データが消えすぎていないかチェック
         if len(df_filled) < 10: return None, {}, None
 
-        # 最新レート
         latest_rates = df_filled.iloc[-1].to_dict()
-        
-        # リターン計算
         returns = np.log(df_filled).diff().dropna()
         
         return returns, latest_rates, df_filled
@@ -116,23 +83,16 @@ def fetch_data(days=365):
         return None, {}, None
 
 def calculate_beta(asset_returns, benchmark_returns):
-    # インデックス(日付)を合わせて計算
     common_idx = asset_returns.index.intersection(benchmark_returns.index)
-    
     if len(common_idx) < 10: return 0.0
-    
     y = asset_returns.loc[common_idx]
     x = benchmark_returns.loc[common_idx]
-    
-    # 分散が0の場合は0を返す(エラー回避)
     if x.std() == 0 or y.std() == 0: return 0.0
-
     slope, _, _, _, _ = stats.linregress(x, y)
     if np.isnan(slope): return 0.0
     return slope
 
 def generate_weights(n):
-    """精密モード: 10%刻みの重み生成"""
     weights = []
     if n == 1: return [{0: 1.0}]
     elif n == 2:
@@ -155,6 +115,13 @@ with st.sidebar:
 
     capital = st.number_input("💰 運用資金 (円)", value=1000000, step=100000)
     leverage = st.number_input("⚙️ 目標レバレッジ (倍)", value=16.0, step=0.1)
+
+    st.subheader("🛡️ リスク制御")
+    # ★変更点1: βの初期値を 0.05 に変更
+    target_beta = st.slider("許容するβの範囲 (±)", 0.01, 0.20, 0.05, step=0.01, help="推奨: 0.05以下")
+    
+    # ★変更点2: TRY制限スライダーを追加
+    try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 100, step=10, help="買いポジション全体のうち、トルコリラが占める割合の上限を設定します。")
     
     with st.expander("📝 スワップポイント設定", expanded=False):
         swap_inputs = {}
@@ -181,25 +148,21 @@ if st.button("🚀 計算スタート", type="primary"):
         st.stop()
 
     with st.spinner("⏳ データ取得＆最適化計算中..."):
-        # 1. データ取得
-        # 必要そうなデータをfetch_data内で全て取得・整理させる
-        df_returns, current_rates, df_prices = fetch_data(days=730) # 期間を長めにとって安定させる
+        df_returns, current_rates, df_prices = fetch_data(days=730)
         
         if df_returns is None or df_returns.empty:
-            st.error("❌ データ取得エラー。Yahoo Financeからデータを取得できませんでした。しばらく待ってから再試行してください。")
+            st.error("❌ データ取得エラー。Yahoo Financeからデータを取得できませんでした。")
             st.stop()
             
-        # 2. β計算の準備
         betas = {}
         if "USDJPY" not in df_returns.columns:
-            st.error(f"❌ USDJPYのデータが取得できませんでした。(取得列: {list(df_returns.columns)})")
+            st.error(f"❌ USDJPYデータ不足 (取得列: {list(df_returns.columns)})")
             st.stop()
             
         for col in df_returns.columns:
             if col == "USDJPY": betas[col] = 1.0
             else: betas[col] = calculate_beta(df_returns[col], df_returns["USDJPY"])
             
-        # 3. 総当たりシミュレーション
         target_notional = capital * leverage
         valid_plans = []
         
@@ -218,19 +181,23 @@ if st.button("🚀 計算スタート", type="primary"):
                 for wp in generate_weights(2): sell_combos.append({combo[i]: wp[i] for i in range(2)})
         for c in sell_candidates: sell_combos.append({c: 1.0})
         
-        # 探索ループ
         for b_pat in buy_combos:
-            # データがある通貨のみで計算
             if not all(ccy in betas for ccy in b_pat): continue
 
+            # ★変更点3: TRY保有比率のチェック
+            # TRYJPYが含まれていない場合はスルー(エラーにならない安全設計)
+            if "TRYJPY" in b_pat:
+                if b_pat["TRYJPY"] > (try_limit / 100):
+                    continue
+
             b_beta = sum(betas.get(ccy, 0) * w for ccy, w in b_pat.items())
+            
             for s_pat in sell_combos:
                 if not all(ccy in betas for ccy in s_pat): continue
-
                 s_beta = sum(betas.get(ccy, 0) * w for ccy, w in s_pat.items()) * -1
                 net_beta = b_beta + s_beta
                 
-                if abs(net_beta) < 0.15:
+                if abs(net_beta) < target_beta:
                     side_notional = target_notional / 2
                     daily_swap = 0
                     try:
@@ -251,9 +218,8 @@ if st.button("🚀 計算スタート", type="primary"):
                     except: continue
 
         if not valid_plans:
-            st.error("❌ 条件に合う組み合わせが見つかりませんでした。βの条件を緩めるか、候補を増やしてください。")
+            st.error(f"❌ 条件(β < {target_beta})に合う組み合わせが見つかりませんでした。条件を緩めるか、候補を増やしてください。")
         else:
-            # 4. 結果表示
             valid_plans.sort(key=lambda x: x["swap"], reverse=True)
             best = valid_plans[0]
             
@@ -283,39 +249,33 @@ if st.button("🚀 計算スタート", type="primary"):
                     orders.append({"売買": "売り", "通貨ペア": ccy, "比率": f"{w*100:.0f}%", "推奨ロット": round(lots, 2)})
             st.dataframe(pd.DataFrame(orders), hide_index=True)
 
-            # 5. グラフ描画
             st.markdown("---")
             
-            # グラフ用のデータを作成 (ここでもデータがあるかチェック)
             buy_series = pd.Series(0.0, index=df_returns.index)
             valid_buy = True
             for ccy, w in best['buy'].items():
                 if ccy in df_returns.columns: 
                     buy_series += df_returns[ccy] * w
-                else:
-                    valid_buy = False
+                else: valid_buy = False
             
             sell_series = pd.Series(0.0, index=df_returns.index)
             valid_sell = True
             for ccy, w in best['sell'].items():
                 if ccy in df_returns.columns: 
                     sell_series += df_returns[ccy] * w
-                else:
-                    valid_sell = False
+                else: valid_sell = False
             
             if valid_buy and valid_sell:
                 daily_capital_pl = (buy_series - sell_series) * side_notional
                 total_pl = (daily_capital_pl + best_swap_val).cumsum()
                 capital_only = daily_capital_pl.cumsum()
                 
-                # 損益グラフ
                 fig_bt = go.Figure()
                 fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl.values, name='合計損益', line=dict(color='green', width=2)))
                 fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only.values, name='為替損益のみ', line=dict(color='gray', dash='dot')))
                 fig_bt.update_layout(title="📈 1年間の損益シミュレーション", height=400)
                 st.plotly_chart(fig_bt, use_container_width=True)
 
-                # 相関グラフ
                 buy_nav = (1 + buy_series).cumprod() * 100
                 sell_nav = (1 + sell_series).cumprod() * 100
                 
@@ -329,4 +289,4 @@ if st.button("🚀 計算スタート", type="primary"):
                 if np.isnan(corr): corr = 0.0
                 st.info(f"💡 **相関係数: {corr:.4f}** (1.0に近いほどリスクヘッジが効いています)")
             else:
-                st.warning("⚠️ 一部の通貨データの履歴不足により、グラフを描画できませんでした。")
+                st.warning("⚠️ データの履歴不足により、グラフを描画できませんでした。")
