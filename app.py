@@ -5,7 +5,7 @@ import yfinance as yf
 from scipy import stats
 import plotly.graph_objects as go
 import itertools
-import time  # ★追加: 待機時間を作るため
+import time
 
 # --- ページ設定 ---
 st.set_page_config(page_title="S6戦略 自動最適化ツール", layout="wide")
@@ -36,72 +36,51 @@ def fetch_data(days=1095):
     debug_logs = []
     
     try:
-        # 1. USDJPYを単独で確実に取る (VIP待遇 + リトライ)
         usd_symbol = "USDJPY=X"
         other_symbols = [v for k, v in TICKER_MAP.items() if v != usd_symbol]
         
-        # --- USDJPY 取得 (最大3回チャレンジ) ---
+        # --- USDJPY 取得 ---
         df_usd_clean = pd.DataFrame()
         max_retries = 3
-        
         for attempt in range(max_retries):
             try:
-                # auto_adjust=False はデータの欠損を防ぐのに有効
                 data_usd = yf.download(usd_symbol, period=f"{days}d", progress=False, auto_adjust=False)
-                
                 if not data_usd.empty:
-                    # データ整形
                     target_col = None
                     if isinstance(data_usd, pd.DataFrame):
-                        if 'Close' in data_usd.columns:
-                            target_col = data_usd['Close']
-                        elif 'Adj Close' in data_usd.columns:
-                            target_col = data_usd['Adj Close']
+                        if 'Close' in data_usd.columns: target_col = data_usd['Close']
+                        elif 'Adj Close' in data_usd.columns: target_col = data_usd['Adj Close']
                         elif isinstance(data_usd.columns, pd.MultiIndex):
-                             try:
-                                 target_col = data_usd.xs('Close', axis=1, level=0).iloc[:, 0]
-                             except:
-                                 target_col = data_usd.iloc[:, 0]
-                        else:
-                            target_col = data_usd.iloc[:, 0]
-                    
+                             try: target_col = data_usd.xs('Close', axis=1, level=0).iloc[:, 0]
+                             except: target_col = data_usd.iloc[:, 0]
+                        else: target_col = data_usd.iloc[:, 0]
                     if target_col is not None:
                         df_usd_clean["USDJPY"] = target_col
-                        debug_logs.append(f"USDJPY fetched successfully on attempt {attempt+1}")
-                        break # 成功したらループを抜ける
+                        break
             except Exception as e:
                 debug_logs.append(f"Attempt {attempt+1} failed: {str(e)}")
-            
-            # 失敗したら1秒待つ
             time.sleep(1)
 
         if df_usd_clean.empty:
-            debug_logs.append("Critical Error: Failed to fetch USDJPY after retries.")
+            debug_logs.append("Critical Error: Failed to fetch USDJPY.")
             return None, {}, None, debug_logs
 
-        # --- その他通貨 取得 (こちらもリトライ) ---
+        # --- その他通貨 取得 ---
         df_others_clean = pd.DataFrame()
-        
         for attempt in range(max_retries):
             try:
                 data_others = yf.download(other_symbols, period=f"{days}d", progress=False, auto_adjust=False)
-                
                 if not data_others.empty:
-                    # データ整形
                     df_temp = pd.DataFrame()
                     if isinstance(data_others.columns, pd.MultiIndex):
-                        if 'Close' in data_others.columns.get_level_values(0):
-                            df_temp = data_others['Close'].copy()
-                        elif 'Adj Close' in data_others.columns.get_level_values(0):
-                            df_temp = data_others['Adj Close'].copy()
+                        if 'Close' in data_others.columns.get_level_values(0): df_temp = data_others['Close'].copy()
+                        elif 'Adj Close' in data_others.columns.get_level_values(0): df_temp = data_others['Adj Close'].copy()
                         else:
                             df_temp = data_others.copy()
                             df_temp.columns = df_temp.columns.droplevel(0)
                     else:
-                        if 'Close' in data_others.columns:
-                             df_temp = data_others[['Close']].copy()
-                        else:
-                             df_temp = data_others.copy()
+                        if 'Close' in data_others.columns: df_temp = data_others[['Close']].copy()
+                        else: df_temp = data_others.copy()
 
                     for col in df_temp.columns:
                         col_str = str(col).upper()
@@ -109,27 +88,17 @@ def fetch_data(days=1095):
                         for internal_name, yahoo_symbol in TICKER_MAP.items():
                             if internal_name == "USDJPY": continue
                             search_key = yahoo_symbol.upper().replace("=X", "")
-                            if search_key in col_str:
-                                matched_name = internal_name
-                                break
-                        if matched_name:
-                            df_others_clean[matched_name] = df_temp[col]
-                    
-                    debug_logs.append(f"Other pairs fetched successfully on attempt {attempt+1}")
+                            if search_key in col_str: matched_name = internal_name; break
+                        if matched_name: df_others_clean[matched_name] = df_temp[col]
                     break
-            except Exception as e:
-                 debug_logs.append(f"Others Attempt {attempt+1} failed: {str(e)}")
-            
+            except: pass
             time.sleep(1)
 
-        # --- 合体 (Merge) ---
         final_df = df_usd_clean.join(df_others_clean, how='outer')
-        
         if final_df.empty: return None, {}, None, debug_logs
         
         final_df = final_df.dropna(axis=1, how='all')
-        df_filled = final_df.ffill().bfill()
-        df_filled = df_filled.dropna(how='all')
+        df_filled = final_df.ffill().bfill().dropna(how='all')
 
         if len(df_filled) < 10: return None, {}, None, debug_logs
 
@@ -178,12 +147,25 @@ with st.sidebar:
     
     password = st.text_input("🔑 パスワード (未入力でデモモード)", type="password")
     
+    # ★変更点: モードに応じた初期値の設定
     if password == "s6secret":
         is_demo_mode = False
         st.success("🔓 認証成功: フル機能モード")
+        
+        # 本番用の厳しい初期値
+        default_other_limit = 40
+        default_try_limit = 20
+        default_buy_range = (2, 4)
+        default_sell_range = (2, 3)
     else:
         is_demo_mode = True
-        st.info("👀 デモモードで動作中 (通貨ペア制限あり)")
+        st.info("👀 デモモードで動作中")
+        
+        # デモ用の緩い初期値 (これならエラーにならない)
+        default_other_limit = 100
+        default_try_limit = 100
+        default_buy_range = (1, 2)
+        default_sell_range = (1, 1)
 
     capital = st.number_input("💰 運用資金 (円)", value=1000000, step=100000)
     leverage = st.number_input("⚙️ 目標レバレッジ (倍)", value=16.0, step=0.1)
@@ -206,12 +188,14 @@ with st.sidebar:
     target_corr = st.slider("最低相関係数", -1.0, 1.0, 0.80, step=0.05)
     
     st.caption("通貨保有比率の制限")
-    other_limit = st.slider("🌍 TRY以外の最大比率制限 (%)", 10, 100, 40, step=10)
-    try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 20, step=5)
+    # ★変更点: valueに変数を使用
+    other_limit = st.slider("🌍 TRY以外の最大比率制限 (%)", 10, 100, default_other_limit, step=10)
+    try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, default_try_limit, step=5)
     
     st.subheader("🔢 構成通貨数")
-    buy_count_range = st.slider("買い通貨ペア数 (範囲)", 1, 4, (1, 4))
-    sell_count_range = st.slider("売り通貨ペア数 (範囲)", 1, 4, (1, 3))
+    # ★変更点: valueに変数を使用
+    buy_count_range = st.slider("買い通貨ペア数 (範囲)", 1, 4, default_buy_range)
+    sell_count_range = st.slider("売り通貨ペア数 (範囲)", 1, 4, default_sell_range)
 
     st.markdown("---")
     st.subheader("📈 グラフ表示設定")
@@ -246,7 +230,7 @@ with col2:
 if st.button("🚀 計算スタート", type="primary"):
     
     if len(buy_candidates) < buy_count_range[0] or len(sell_candidates) < sell_count_range[0]:
-        st.error("⚠️ エラー: 候補通貨の数が、指定された最小構成数より少ないです。")
+        st.error(f"⚠️ エラー: 候補通貨の数が足りません。買いは{buy_count_range[0]}つ以上、売りは{sell_count_range[0]}つ以上選んでください。")
         st.stop()
 
     with st.spinner("⏳ データ取得＆最適化計算中..."):
@@ -255,23 +239,16 @@ if st.button("🚀 計算スタート", type="primary"):
         if df_full is None or df_full.empty:
             st.error("❌ データ取得エラー。以下のデバッグ情報を確認してください。")
             with st.expander("🛠️ デバッグ情報"):
-                for log in debug_logs:
-                    st.write(log)
+                for log in debug_logs: st.write(log)
         else:
-            if "1年" in calc_period_option:
-                calc_days = 250
-            elif "2年" in calc_period_option:
-                calc_days = 500
-            else:
-                calc_days = 750
+            if "1年" in calc_period_option: calc_days = 250
+            elif "2年" in calc_period_option: calc_days = 500
+            else: calc_days = 750
             
             df_calc = df_full.tail(calc_days)
             
             if "USDJPY" not in df_calc.columns:
-                st.error(f"❌ USDJPYのデータ取得に失敗しました。時間をおいて再試行してください。(取得できた列: {list(df_calc.columns)})")
-                with st.expander("🛠️ デバッグ情報"):
-                    for log in debug_logs:
-                        st.write(log)
+                st.error(f"❌ USDJPYのデータ取得に失敗しました。再試行してください。")
                 st.stop()
 
             betas = {}
@@ -282,9 +259,11 @@ if st.button("🚀 計算スタート", type="primary"):
             target_notional = capital * leverage
             valid_plans = []
             fallback_plans = []
+            
+            rejected_by_ratio = 0 
+            total_combinations = 0
 
-            # --- 組み合わせ生成 & 事前計算 ---
-            # 1. 買い
+            # --- 組み合わせ生成 ---
             buy_precalc = []
             for size in range(buy_count_range[0], min(buy_count_range[1], len(buy_candidates)) + 1):
                 for combo in itertools.combinations(buy_candidates, size):
@@ -292,6 +271,7 @@ if st.button("🚀 計算スタート", type="primary"):
                     weights_list = generate_weights(size)
                     for wp in weights_list:
                         pattern = {combo[i]: wp[i] for i in range(size)}
+                        total_combinations += 1
                         
                         is_valid_weight = True
                         for ccy, weight in pattern.items():
@@ -299,7 +279,10 @@ if st.button("🚀 計算スタート", type="primary"):
                                 if weight > (try_limit / 100): is_valid_weight = False; break
                             else:
                                 if weight > (other_limit / 100): is_valid_weight = False; break
-                        if not is_valid_weight: continue
+                        
+                        if not is_valid_weight: 
+                            rejected_by_ratio += 1
+                            continue
 
                         b_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items())
                         b_series = pd.Series(0.0, index=df_calc.index)
@@ -353,10 +336,8 @@ if st.button("🚀 計算スタート", type="primary"):
             for b_item in buy_precalc:
                 for s_item in sell_precalc:
                     net_beta = b_item["beta"] + s_item["beta"]
-                    
                     corr = b_item["series"].corr(s_item["series"])
                     if np.isnan(corr): corr = 0
-                    
                     total_swap = b_item["swap"] + s_item["swap"]
                     
                     plan_data = {
@@ -369,7 +350,6 @@ if st.button("🚀 計算スタート", type="primary"):
                     else:
                         fallback_plans.append(plan_data)
 
-            # 結果の選定
             final_best = None
             is_fallback = False
 
@@ -377,23 +357,20 @@ if st.button("🚀 計算スタート", type="primary"):
                 valid_plans.sort(key=lambda x: x["swap"], reverse=True)
                 final_best = valid_plans[0]
             elif fallback_plans:
-                # 敗者復活: β絶対値優先、次にスワップ
                 fallback_plans.sort(key=lambda x: (abs(x["beta"]), -x["swap"]))
                 final_best = fallback_plans[0]
                 is_fallback = True
             
             if final_best is None:
-                st.error(f"❌ 計算可能な組み合わせが1つも見つかりませんでした。")
+                st.error("❌ 計算可能な組み合わせが1つも見つかりませんでした。")
+                if total_combinations > 0 and rejected_by_ratio == total_combinations:
+                     st.warning(f"💡 **原因診断:** 通貨保有比率の制限（TRY {try_limit}%, その他 {other_limit}%）が厳しすぎて、すべての組み合わせが却下されました。スライダーで制限を緩めてください。")
                 if 'results' in st.session_state: del st.session_state['results']
             else:
                 st.session_state['results'] = {
-                    'best': final_best,
-                    'is_fallback': is_fallback,
-                    'df_full': df_full,
-                    'calc_period': calc_period_option,
-                    'target_notional': target_notional,
-                    'capital': capital,
-                    'current_rates': current_rates
+                    'best': final_best, 'is_fallback': is_fallback,
+                    'df_full': df_full, 'calc_period': calc_period_option,
+                    'target_notional': target_notional, 'capital': capital, 'current_rates': current_rates
                 }
 
 # --- 結果表示 ---
@@ -405,7 +382,6 @@ if 'results' in st.session_state:
     target_notional = res['target_notional']
     calc_capital = res['capital']
     current_rates = res['current_rates']
-    
     best_swap_val = best['swap'] if not np.isnan(best['swap']) else 0
 
     if is_fallback:
@@ -438,25 +414,19 @@ if 'results' in st.session_state:
     st.dataframe(pd.DataFrame(orders), hide_index=True)
 
     st.markdown("---")
-    
     st.subheader(f"📊 バックテスト ({plot_period_option})")
     
-    if "1年" in plot_period_option:
-        df_plot = df_full.tail(250)
-    elif "2年" in plot_period_option:
-        df_plot = df_full.tail(500)
-    else:
-        df_plot = df_full
+    if "1年" in plot_period_option: df_plot = df_full.tail(250)
+    elif "2年" in plot_period_option: df_plot = df_full.tail(500)
+    else: df_plot = df_full
     
     buy_series = pd.Series(0.0, index=df_plot.index)
     for ccy, w in best['buy'].items(): buy_series += df_plot[ccy] * w
-    
     sell_series = pd.Series(0.0, index=df_plot.index)
     for ccy, w in best['sell'].items(): sell_series += df_plot[ccy] * w
     
-    daily_capital_pl = (buy_series - sell_series) * side_notional
-    total_pl = (daily_capital_pl + best_swap_val).cumsum()
-    capital_only = daily_capital_pl.cumsum()
+    total_pl = ((buy_series - sell_series) * side_notional + best_swap_val).cumsum()
+    capital_only = ((buy_series - sell_series) * side_notional).cumsum()
     
     total_pl_pct = (total_pl / calc_capital) * 100
     capital_only_pct = (capital_only / calc_capital) * 100
@@ -464,13 +434,7 @@ if 'results' in st.session_state:
     fig_bt = go.Figure()
     fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl_pct.values, name='合計損益 (%)', line=dict(color='green', width=2)))
     fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only_pct.values, name='為替損益のみ (%)', line=dict(color='gray', dash='dot')))
-    
-    fig_bt.update_layout(
-        title=f"損益推移 (対元本比率)", 
-        height=400,
-        yaxis_title="損益率 (%)",
-        yaxis_ticksuffix="%"
-    )
+    fig_bt.update_layout(title=f"損益推移 (対元本比率)", height=400, yaxis_title="損益率 (%)", yaxis_ticksuffix="%")
     st.plotly_chart(fig_bt, use_container_width=True)
 
     buy_nav = (1 + buy_series).cumprod() * 100
