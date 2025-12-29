@@ -31,94 +31,77 @@ DEFAULT_LOT_SIZE = {
 
 @st.cache_data(ttl=3600)
 def fetch_data(days=1095):
-    """データ取得 (USDJPY強制認識版)"""
-    debug_logs = [] # デバッグ用ログ
+    """データ取得 (USDJPY VIP分離取得版)"""
+    debug_logs = []
     
     try:
-        symbols = list(TICKER_MAP.values())
+        # 1. USDJPYを単独で確実に取る (VIP待遇)
+        usd_symbol = "USDJPY=X"
+        other_symbols = [v for k, v in TICKER_MAP.items() if v != usd_symbol]
         
-        # 1. まとめてダウンロード
-        # auto_adjust=False にして Close を確実に取る
-        data = yf.download(symbols, period=f"{days}d", progress=False, auto_adjust=False)
-        debug_logs.append(f"Bulk Download Shape: {data.shape}")
-        debug_logs.append(f"Bulk Columns: {data.columns}")
-
-        # 2. データ整形関数
-        def clean_yfinance_data(raw_data):
-            df_out = pd.DataFrame()
-            if raw_data.empty: return df_out
-
-            # 構造の平坦化: Close または Adj Close を探す
-            df_temp = pd.DataFrame()
-            
-            # MultiIndexの場合
-            if isinstance(raw_data.columns, pd.MultiIndex):
-                # レベル0に Close があるか
-                if 'Close' in raw_data.columns.get_level_values(0):
-                    df_temp = raw_data['Close'].copy()
-                elif 'Adj Close' in raw_data.columns.get_level_values(0):
-                    df_temp = raw_data['Adj Close'].copy()
+        # --- USDJPY 取得 ---
+        data_usd = yf.download(usd_symbol, period=f"{days}d", progress=False, auto_adjust=False)
+        
+        # USDJPYの整形
+        df_usd_clean = pd.DataFrame()
+        if not data_usd.empty:
+            if isinstance(data_usd, pd.DataFrame):
+                target_col = None
+                if 'Close' in data_usd.columns:
+                    target_col = data_usd['Close']
+                elif 'Adj Close' in data_usd.columns:
+                    target_col = data_usd['Adj Close']
+                elif isinstance(data_usd.columns, pd.MultiIndex):
+                     try:
+                         target_col = data_usd.xs('Close', axis=1, level=0).iloc[:, 0]
+                     except:
+                         target_col = data_usd.iloc[:, 0]
                 else:
-                    # レベルが不明なら単純にDroplevel
-                    df_temp = raw_data.copy()
+                    target_col = data_usd.iloc[:, 0]
+                
+                if target_col is not None:
+                    df_usd_clean["USDJPY"] = target_col
+
+        if df_usd_clean.empty:
+            debug_logs.append("Critical Error: Failed to fetch USDJPY standalone.")
+            return None, {}, None, debug_logs
+
+        # --- その他通貨 取得 ---
+        data_others = yf.download(other_symbols, period=f"{days}d", progress=False, auto_adjust=False)
+        
+        # その他通貨の整形
+        df_others_clean = pd.DataFrame()
+        if not data_others.empty:
+            df_temp = pd.DataFrame()
+            if isinstance(data_others.columns, pd.MultiIndex):
+                if 'Close' in data_others.columns.get_level_values(0):
+                    df_temp = data_others['Close'].copy()
+                elif 'Adj Close' in data_others.columns.get_level_values(0):
+                    df_temp = data_others['Adj Close'].copy()
+                else:
+                    df_temp = data_others.copy()
                     df_temp.columns = df_temp.columns.droplevel(0)
             else:
-                # SingleIndexの場合
-                if 'Close' in raw_data.columns:
-                     df_temp = raw_data[['Close']].copy()
-                elif 'Adj Close' in raw_data.columns:
-                     df_temp = raw_data[['Adj Close']].copy()
+                if 'Close' in data_others.columns:
+                     df_temp = data_others[['Close']].copy()
                 else:
-                     df_temp = raw_data.copy()
+                     df_temp = data_others.copy()
 
-            # カラム名のマッピング
             for col in df_temp.columns:
                 col_str = str(col).upper()
                 matched_name = None
                 for internal_name, yahoo_symbol in TICKER_MAP.items():
-                    # シンボル名(USDJPY=X)の一部が含まれていればOK
+                    if internal_name == "USDJPY": continue
                     search_key = yahoo_symbol.upper().replace("=X", "")
                     if search_key in col_str:
                         matched_name = internal_name
                         break
                 if matched_name:
-                    df_out[matched_name] = df_temp[col]
-            
-            return df_out
+                    df_others_clean[matched_name] = df_temp[col]
 
-        final_df = clean_yfinance_data(data)
-
-        # 3. ★最強の救済措置: USDJPYがない場合
-        if "USDJPY" not in final_df.columns:
-            debug_logs.append("USDJPY missing in bulk. Attempting rescue...")
-            try:
-                # 単独で取りに行く
-                usd_data = yf.download("USDJPY=X", period=f"{days}d", progress=False, auto_adjust=False)
-                debug_logs.append(f"Rescue Download Shape: {usd_data.shape}")
-                
-                if not usd_data.empty:
-                    # ★ここが修正点: 列名チェックをせず、強制的にデータを使う
-                    # 単独取得の場合、MultiIndexかSeriesか予測しづらいため
-                    # 「とにかく最初の列」をUSDJPYとして扱う
-                    if isinstance(usd_data, pd.DataFrame):
-                        # Close列を探すが、なければ1列目を使う
-                        if 'Close' in usd_data.columns:
-                            usd_series = usd_data['Close']
-                        elif isinstance(usd_data.columns, pd.MultiIndex) and 'Close' in usd_data.columns.get_level_values(0):
-                             usd_series = usd_data['Close'].iloc[:, 0] # Closeの中の最初の列
-                        else:
-                            usd_series = usd_data.iloc[:, 0]
-                    else:
-                        usd_series = usd_data # Seriesの場合
-                    
-                    usd_series.name = "USDJPY" # 名前を強制書き換え
-                    
-                    # 結合
-                    final_df = final_df.join(usd_series, how='outer')
-                    debug_logs.append("Rescue successful. USDJPY joined.")
-            except Exception as e:
-                debug_logs.append(f"Rescue failed: {str(e)}")
-
+        # --- 合体 (Merge) ---
+        final_df = df_usd_clean.join(df_others_clean, how='outer')
+        
         if final_df.empty: return None, {}, None, debug_logs
         
         final_df = final_df.dropna(axis=1, how='all')
@@ -131,6 +114,7 @@ def fetch_data(days=1095):
         returns = np.log(df_filled).diff().dropna()
         
         return returns, latest_rates, df_filled, debug_logs
+
     except Exception as e:
         debug_logs.append(f"Fatal Error: {str(e)}")
         return None, {}, None, debug_logs
@@ -195,16 +179,16 @@ with st.sidebar:
         index=0
     )
     
-    target_beta = st.slider("許容するβの範囲 (±)", 0.01, 0.20, 0.05, step=0.01)
-    target_corr = st.slider("最低相関係数", 0.0, 1.0, 0.80, step=0.05)
+    target_beta = st.slider("許容するβの範囲 (±)", 0.01, 0.50, 0.05, step=0.01)
+    target_corr = st.slider("最低相関係数", -1.0, 1.0, 0.80, step=0.05)
     
     st.caption("通貨保有比率の制限")
     other_limit = st.slider("🌍 TRY以外の最大比率制限 (%)", 10, 100, 40, step=10)
     try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 20, step=5)
     
     st.subheader("🔢 構成通貨数")
-    buy_count_range = st.slider("買い通貨ペア数 (範囲)", 1, 4, (2, 4))
-    sell_count_range = st.slider("売り通貨ペア数 (範囲)", 1, 4, (2, 3))
+    buy_count_range = st.slider("買い通貨ペア数 (範囲)", 1, 4, (1, 4))
+    sell_count_range = st.slider("売り通貨ペア数 (範囲)", 1, 4, (1, 3))
 
     st.markdown("---")
     st.subheader("📈 グラフ表示設定")
@@ -243,7 +227,6 @@ if st.button("🚀 計算スタート", type="primary"):
         st.stop()
 
     with st.spinner("⏳ データ取得＆最適化計算中..."):
-        # デバッグログを受け取る
         df_full, current_rates, df_prices, debug_logs = fetch_data(days=1095)
         
         if df_full is None or df_full.empty:
@@ -261,13 +244,11 @@ if st.button("🚀 計算スタート", type="primary"):
             
             df_calc = df_full.tail(calc_days)
             
-            # --- ここで USDJPY があるか最終チェック ---
             if "USDJPY" not in df_calc.columns:
                 st.error(f"❌ USDJPYのデータ取得に失敗しました。時間をおいて再試行してください。(取得できた列: {list(df_calc.columns)})")
-                with st.expander("🛠️ デバッグ情報 (なぜ取れなかったか)"):
+                with st.expander("🛠️ デバッグ情報"):
                     for log in debug_logs:
                         st.write(log)
-                    st.write("Current Columns:", df_full.columns)
                 st.stop()
 
             betas = {}
@@ -277,6 +258,7 @@ if st.button("🚀 計算スタート", type="primary"):
             
             target_notional = capital * leverage
             valid_plans = []
+            fallback_plans = [] # ★敗者復活用のリスト
 
             # --- 組み合わせ生成 & 事前計算 ---
             # 1. 買い
@@ -348,25 +330,42 @@ if st.button("🚀 計算スタート", type="primary"):
             for b_item in buy_precalc:
                 for s_item in sell_precalc:
                     net_beta = b_item["beta"] + s_item["beta"]
-                    if abs(net_beta) >= target_beta: continue
+                    
                     corr = b_item["series"].corr(s_item["series"])
                     if np.isnan(corr): corr = 0
-                    if corr < target_corr: continue
                     
-                    valid_plans.append({
+                    total_swap = b_item["swap"] + s_item["swap"]
+                    
+                    plan_data = {
                         "buy": b_item["pattern"], "sell": s_item["pattern"],
-                        "beta": net_beta, "swap": b_item["swap"] + s_item["swap"], "corr": corr
-                    })
+                        "beta": net_beta, "swap": total_swap, "corr": corr
+                    }
 
-            if not valid_plans:
-                st.error(f"❌ 条件に合うプランが見つかりませんでした。\n(β < {target_beta}, 相関 > {target_corr})")
+                    if abs(net_beta) < target_beta and corr > target_corr:
+                        valid_plans.append(plan_data)
+                    else:
+                        fallback_plans.append(plan_data)
+
+            # 結果の選定
+            final_best = None
+            is_fallback = False
+
+            if valid_plans:
+                valid_plans.sort(key=lambda x: x["swap"], reverse=True)
+                final_best = valid_plans[0]
+            elif fallback_plans:
+                # ★修正: βの絶対値が小さい(0に近い)順に並べ替え、第2キーでスワップ
+                fallback_plans.sort(key=lambda x: (abs(x["beta"]), -x["swap"]))
+                final_best = fallback_plans[0]
+                is_fallback = True
+            
+            if final_best is None:
+                st.error(f"❌ 計算可能な組み合わせが1つも見つかりませんでした。")
                 if 'results' in st.session_state: del st.session_state['results']
             else:
-                valid_plans.sort(key=lambda x: x["swap"], reverse=True)
-                best = valid_plans[0]
-                
                 st.session_state['results'] = {
-                    'best': best,
+                    'best': final_best,
+                    'is_fallback': is_fallback,
                     'df_full': df_full,
                     'calc_period': calc_period_option,
                     'target_notional': target_notional,
@@ -378,6 +377,7 @@ if st.button("🚀 計算スタート", type="primary"):
 if 'results' in st.session_state:
     res = st.session_state['results']
     best = res['best']
+    is_fallback = res.get('is_fallback', False)
     df_full = res['df_full']
     target_notional = res['target_notional']
     calc_capital = res['capital']
@@ -385,7 +385,12 @@ if 'results' in st.session_state:
     
     best_swap_val = best['swap'] if not np.isnan(best['swap']) else 0
 
-    st.success("🎉 計算完了！最適なプランが見つかりました")
+    if is_fallback:
+        st.warning("⚠️ 条件（β・相関）を完全に満たすプランが見つかりませんでした。")
+        st.markdown(f"**参考として、条件外の中で最もβが低く安全なプランを表示します。**")
+    else:
+        st.success("🎉 計算完了！最適なプランが見つかりました")
+    
     st.info(f"最適化基準: {res['calc_period']} のデータを使用")
 
     m1, m2, m3 = st.columns(3)
