@@ -93,8 +93,10 @@ def calculate_beta(asset_returns, benchmark_returns):
     return slope
 
 def generate_weights(n):
+    """精密モード: 10%刻みの重み生成 (2〜4通貨対応)"""
     weights = []
-    if n == 1: return [{0: 1.0}]
+    if n == 1:
+        return [{0: 1.0}]
     elif n == 2:
         for i in range(1, 10): weights.append({0: i/10, 1: (10-i)/10})
     elif n == 3:
@@ -102,6 +104,15 @@ def generate_weights(n):
             for j in range(1, 9-i):
                 k = 10 - i - j
                 if k > 0: weights.append({0: i/10, 1: j/10, 2: k/10})
+    # ★追加: 4通貨分散パターン
+    elif n == 4:
+        # 計算量削減のため20%刻みも検討するが、一旦10%刻みで実装(Renderなら耐えるはず)
+        for i in range(1, 8):
+            for j in range(1, 8-i):
+                for k in range(1, 8-i-j):
+                    l = 10 - i - j - k
+                    if l > 0:
+                        weights.append({0: i/10, 1: j/10, 2: k/10, 3: l/10})
     return weights
 
 # --- サイドバー設定 ---
@@ -117,11 +128,8 @@ with st.sidebar:
     leverage = st.number_input("⚙️ 目標レバレッジ (倍)", value=16.0, step=0.1)
 
     st.subheader("🛡️ リスク制御")
-    # ★変更点1: βの初期値を 0.05 に変更
     target_beta = st.slider("許容するβの範囲 (±)", 0.01, 0.20, 0.05, step=0.01, help="推奨: 0.05以下")
-    
-    # ★変更点2: TRY制限スライダーを追加
-    try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 100, step=10, help="買いポジション全体のうち、トルコリラが占める割合の上限を設定します。")
+    try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 100, step=10)
     
     with st.expander("📝 スワップポイント設定", expanded=False):
         swap_inputs = {}
@@ -147,7 +155,7 @@ if st.button("🚀 計算スタート", type="primary"):
         st.error("⚠️ エラー: 買い候補は2つ以上、売り候補は1つ以上選んでください。")
         st.stop()
 
-    with st.spinner("⏳ データ取得＆最適化計算中..."):
+    with st.spinner("⏳ データ取得＆最適化計算中... (パターン数が多いと少し時間がかかります)"):
         df_returns, current_rates, df_prices = fetch_data(days=730)
         
         if df_returns is None or df_returns.empty:
@@ -166,34 +174,48 @@ if st.button("🚀 計算スタート", type="primary"):
         target_notional = capital * leverage
         valid_plans = []
         
-        # 組み合わせ生成
-        buy_combos = []
-        if len(buy_candidates) >= 3:
-            for combo in itertools.combinations(buy_candidates, 3):
-                for wp in generate_weights(3): buy_combos.append({combo[i]: wp[i] for i in range(3)})
-        elif len(buy_candidates) >= 2:
-            for combo in itertools.combinations(buy_candidates, 2):
-                for wp in generate_weights(2): buy_combos.append({combo[i]: wp[i] for i in range(2)})
-
-        sell_combos = []
-        if len(sell_candidates) >= 2:
-            for combo in itertools.combinations(sell_candidates, 2):
-                for wp in generate_weights(2): sell_combos.append({combo[i]: wp[i] for i in range(2)})
-        for c in sell_candidates: sell_combos.append({c: 1.0})
+        # --- 組み合わせ生成ロジックの変更 ---
+        # 2通貨ペア, 3通貨ペア, 4通貨ペア をすべて試し、一番良いものを探す
+        buy_patterns_all = []
         
-        for b_pat in buy_combos:
+        # 探索するサイズ: 2〜4 (ただし候補数が足りない場合はそこまで)
+        max_size = min(4, len(buy_candidates))
+        
+        for size in range(2, max_size + 1):
+            for combo in itertools.combinations(buy_candidates, size):
+                weights_list = generate_weights(size)
+                for wp in weights_list:
+                    # wpは {0: 0.1, 1: 0.9} のようなインデックスキーなので、通貨名キーに変換
+                    pattern = {combo[i]: wp[i] for i in range(size)}
+                    buy_patterns_all.append(pattern)
+
+        # 売りは最大2通貨分散まで（複雑化しすぎるため）
+        sell_patterns_all = []
+        sell_max_size = min(2, len(sell_candidates))
+        for size in range(1, sell_max_size + 1):
+            for combo in itertools.combinations(sell_candidates, size):
+                if size == 1:
+                    sell_patterns_all.append({combo[0]: 1.0})
+                else:
+                    weights_list = generate_weights(size)
+                    for wp in weights_list:
+                        pattern = {combo[i]: wp[i] for i in range(size)}
+                        sell_patterns_all.append(pattern)
+        
+        # --- 総当たり計算 ---
+        for b_pat in buy_patterns_all:
+            # データ確認
             if not all(ccy in betas for ccy in b_pat): continue
 
-            # ★変更点3: TRY保有比率のチェック
-            # TRYJPYが含まれていない場合はスルー(エラーにならない安全設計)
+            # TRY制限チェック
             if "TRYJPY" in b_pat:
-                if b_pat["TRYJPY"] > (try_limit / 100):
-                    continue
+                if b_pat["TRYJPY"] > (try_limit / 100): continue
 
             b_beta = sum(betas.get(ccy, 0) * w for ccy, w in b_pat.items())
             
-            for s_pat in sell_combos:
+            for s_pat in sell_patterns_all:
                 if not all(ccy in betas for ccy in s_pat): continue
+                
                 s_beta = sum(betas.get(ccy, 0) * w for ccy, w in s_pat.items()) * -1
                 net_beta = b_beta + s_beta
                 
@@ -213,7 +235,6 @@ if st.button("🚀 計算スタート", type="primary"):
                             daily_swap += lots * swap_inputs.get(ccy, 0)
                         
                         if np.isnan(daily_swap) or daily_swap == 0: continue
-
                         valid_plans.append({"buy": b_pat, "sell": s_pat, "beta": net_beta, "swap": daily_swap})
                     except: continue
 
@@ -251,6 +272,7 @@ if st.button("🚀 計算スタート", type="primary"):
 
             st.markdown("---")
             
+            # グラフ用データ
             buy_series = pd.Series(0.0, index=df_returns.index)
             valid_buy = True
             for ccy, w in best['buy'].items():
