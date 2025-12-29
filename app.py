@@ -127,8 +127,14 @@ with st.sidebar:
 
     st.subheader("🛡️ リスク制御")
     target_beta = st.slider("許容するβの範囲 (±)", 0.01, 0.20, 0.05, step=0.01, help="推奨: 0.05以下")
-    # ★追加: 相関係数のスライダー (初期値0.8)
-    target_corr = st.slider("最低相関係数", 0.0, 1.0, 0.80, step=0.05, help="買いと売りの動きの一致度。高いほど安全。推奨: 0.8以上")
+    target_corr = st.slider("最低相関係数", 0.0, 1.0, 0.80, step=0.05, help="買いと売りの動きの一致度。推奨: 0.8以上")
+    
+    st.markdown("---")
+    st.caption("通貨保有比率の制限")
+    
+    # ★追加: 一般通貨の制限
+    other_limit = st.slider("🌍 TRY以外の最大比率制限 (%)", 30, 100, 70, step=10, help="特定の通貨(ZARなど)に資金が集中するのを防ぎます。例えば70%にすると、必ず30%は他の通貨を持つことになり、分散が強制されます。")
+    # TRY制限
     try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 100, step=10)
     
     st.subheader("🔢 構成通貨数")
@@ -184,26 +190,35 @@ if st.button("🚀 計算スタート", type="primary"):
         buy_precalc = []
         for size in range(buy_count_range[0], min(buy_count_range[1], len(buy_candidates)) + 1):
             for combo in itertools.combinations(buy_candidates, size):
-                # データの存在チェック
                 if not all(ccy in betas for ccy in combo): continue
 
                 weights_list = generate_weights(size)
                 for wp in weights_list:
                     pattern = {combo[i]: wp[i] for i in range(size)}
                     
-                    # TRY制限チェック
-                    if "TRYJPY" in pattern:
-                        if pattern["TRYJPY"] > (try_limit / 100): continue
+                    # ★追加: 保有比率制限のチェック
+                    is_valid_weight = True
+                    for ccy, weight in pattern.items():
+                        # TRYの場合
+                        if ccy == "TRYJPY":
+                            if weight > (try_limit / 100):
+                                is_valid_weight = False; break
+                        # その他の通貨の場合
+                        else:
+                            if weight > (other_limit / 100):
+                                is_valid_weight = False; break
                     
+                    if not is_valid_weight: continue
+
                     # β計算
                     b_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items())
                     
-                    # 時系列データ計算（相関用）
+                    # 時系列データ計算
                     b_series = pd.Series(0.0, index=df_returns.index)
                     for ccy, w in pattern.items():
                          b_series += df_returns[ccy] * w
                     
-                    # スワップ計算（買いのみ）
+                    # スワップ計算
                     daily_swap_buy = 0
                     valid_swap = True
                     side_notional = target_notional / 2
@@ -233,15 +248,11 @@ if st.button("🚀 計算スタート", type="primary"):
                 for wp in weights_list:
                     pattern = {combo[i]: wp[i] for i in range(size)}
                     
-                    # β計算 (売りなのでマイナス)
                     s_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items()) * -1
-                    
-                    # 時系列データ
                     s_series = pd.Series(0.0, index=df_returns.index)
                     for ccy, w in pattern.items():
                          s_series += df_returns[ccy] * w
                     
-                    # スワップ計算（売りのみ）
                     daily_swap_sell = 0
                     valid_swap = True
                     side_notional = target_notional / 2
@@ -261,20 +272,19 @@ if st.button("🚀 計算スタート", type="primary"):
                             "swap": daily_swap_sell
                         })
 
-        # 3. 総当たりマッチング (高速版)
+        # 3. 総当たりマッチング
         for b_item in buy_precalc:
             for s_item in sell_precalc:
                 
-                # 第1関門: βチェック
+                # βチェック
                 net_beta = b_item["beta"] + s_item["beta"]
                 if abs(net_beta) >= target_beta: continue
                 
-                # 第2関門: 相関チェック
+                # 相関チェック
                 corr = b_item["series"].corr(s_item["series"])
                 if np.isnan(corr): corr = 0
                 if corr < target_corr: continue
                 
-                # 合格したら合計スワップ計算
                 total_swap = b_item["swap"] + s_item["swap"]
                 
                 valid_plans.append({
@@ -286,7 +296,7 @@ if st.button("🚀 計算スタート", type="primary"):
                 })
 
         if not valid_plans:
-            st.error(f"❌ 条件に合うプランが見つかりませんでした。\n(β < {target_beta}, 相関 > {target_corr})\n条件を緩めるか、候補を増やしてください。")
+            st.error(f"❌ 条件に合うプランが見つかりませんでした。\n・β < {target_beta}\n・相関 > {target_corr}\n・通貨比率制限あり\n\n条件を緩めるか、候補を増やしてください。")
         else:
             valid_plans.sort(key=lambda x: x["swap"], reverse=True)
             best = valid_plans[0]
@@ -319,7 +329,6 @@ if st.button("🚀 計算スタート", type="primary"):
 
             st.markdown("---")
             
-            # グラフ描画用にデータ再構築
             buy_series = pd.Series(0.0, index=df_returns.index)
             for ccy, w in best['buy'].items():
                  buy_series += df_returns[ccy] * w
