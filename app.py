@@ -10,6 +10,7 @@ import itertools
 st.set_page_config(page_title="S6戦略 自動最適化ツール", layout="wide")
 
 # --- 定数 ---
+# Yahoo Financeのシンボルと、内部で使う名前の対応表
 TICKER_MAP = {
     "USDJPY": "USDJPY=X", "MXNJPY": "MXNJPY=X", "PLNJPY": "PLNJPY=X",
     "CZKJPY": "CZKJPY=X", "CHFJPY": "CHFJPY=X", "ZARJPY": "ZARJPY=X",
@@ -32,18 +33,47 @@ DEFAULT_LOT_SIZE = {
 
 @st.cache_data(ttl=3600)
 def fetch_data(tickers, days=365):
-    """データ取得 (エラー回避の強化版)"""
+    """データ取得 (ラベル名強制クリーニング版)"""
     try:
         # データを取得
         data = yf.download(tickers, period=f"{days}d", progress=False, auto_adjust=True)
         if data.empty: return None, {}, None
         
-        # カラム構造の正規化
-        if isinstance(data.columns, pd.MultiIndex):
-            try: df = data["Close"]
-            except KeyError: df = data
-        else:
-            df = data["Close"] if "Close" in data.columns else data
+        # ★重要修正: MultiIndex（2段組みの列名）を強制的に平坦化する
+        # 例: ('Close', 'USDJPY=X') → 'USDJPY=X'
+        df = data.copy()
+        if isinstance(df.columns, pd.MultiIndex):
+            # 'Close' または 'Adj Close' のレベルを探して取得
+            if 'Close' in df.columns.get_level_values(0):
+                df = df.xs('Close', axis=1, level=0)
+            elif 'Adj Close' in df.columns.get_level_values(0):
+                df = df.xs('Adj Close', axis=1, level=0)
+            else:
+                # それでもダメなら単純に最後のレベルを使う
+                df.columns = df.columns.get_level_values(-1)
+
+        # ★重要修正: 列名を強制的に内部名称(MXNJPY等)にリネームする
+        # これで後の計算がすべてシンプルになる
+        new_columns = {}
+        for col in df.columns:
+            # =X を削除し、大文字にする
+            clean_name = str(col).upper().replace("=X", "").replace("=x", "").strip()
+            # 対応表にある名前なら採用
+            if clean_name in TICKER_MAP:
+                new_columns[col] = clean_name
+            else:
+                # マップにない場合も、逆引きを試す
+                found = False
+                for internal_name, yahoo_symbol in TICKER_MAP.items():
+                    if yahoo_symbol == col:
+                        new_columns[col] = internal_name
+                        found = True
+                        break
+                if not found:
+                    new_columns[col] = clean_name # とりあえずそのまま
+
+        # 列名を変更
+        df = df.rename(columns=new_columns)
 
         # データの穴埋め
         df_filled = df.ffill().bfill()
@@ -59,9 +89,14 @@ def fetch_data(tickers, days=365):
         return None, {}, None
 
 def calculate_beta(asset_returns, benchmark_returns):
-    idx = asset_returns.index.intersection(benchmark_returns.index)
-    if len(idx) < 10: return 0
-    slope, _, _, _, _ = stats.linregress(benchmark_returns.loc[idx], asset_returns.loc[idx])
+    # インデックスを合わせて計算
+    common_idx = asset_returns.index.intersection(benchmark_returns.index)
+    if len(common_idx) < 10: return 0.0
+    
+    y = asset_returns.loc[common_idx]
+    x = benchmark_returns.loc[common_idx]
+    
+    slope, _, _, _, _ = stats.linregress(x, y)
     return slope
 
 def generate_weights(n):
@@ -118,49 +153,18 @@ if st.button("🚀 計算スタート", type="primary"):
         all_tickers = list(set(buy_candidates + sell_candidates + ["USDJPY"]))
         yf_tickers = [TICKER_MAP[t] for t in all_tickers]
         
-        df_returns, latest_rates_raw, df_prices = fetch_data(yf_tickers)
+        # データ取得実行
+        df_returns, current_rates, df_prices = fetch_data(yf_tickers)
         
         if df_returns is None:
             st.error("❌ データ取得エラー。Yahoo Financeに接続できませんでした。")
             st.stop()
             
-        # ★ここが修正ポイント: カラム名の強制クリーニング
-        # MXNJPY=X が来ても mxnjpy=x が来ても MXNJPY に統一する
-        inv_map = {v: k for k, v in TICKER_MAP.items()}
-        
-        new_cols = []
-        for c in df_returns.columns:
-            # 文字列化して =X を削除し、大文字に統一
-            clean_name = str(c).upper().replace("=X", "").replace("=x", "")
-            # TICKER_MAPのキーにあるか確認
-            if clean_name in TICKER_MAP:
-                new_cols.append(clean_name)
-            else:
-                # 見つからない場合は元のカラム名を使用（マッピング試行）
-                new_cols.append(inv_map.get(c, c))
-        
-        df_returns.columns = new_cols
-        
-        # レート辞書の整理
-        current_rates = {}
-        for k, v in latest_rates_raw.items():
-            # キーがタプルの場合などの処理
-            key_str = str(k[1] if isinstance(k, tuple) else k).upper().replace("=X", "")
-            
-            # マッチング
-            if key_str in TICKER_MAP:
-                current_rates[key_str] = v
-            else:
-                # 予備検索
-                for t_name, t_code in TICKER_MAP.items():
-                    if t_code == k or t_name == k:
-                        current_rates[t_name] = v
-                        break
-        
         # 2. β計算
         betas = {}
+        # カラム名が既にきれいになっているので、そのまま使える
         if "USDJPY" not in df_returns.columns:
-            st.error(f"❌ USDJPYデータ不足 (取得カラム: {list(df_returns.columns)})")
+            st.error(f"❌ USDJPYデータ不足 (取得できたデータ: {list(df_returns.columns)})")
             st.stop()
             
         for col in df_returns.columns:
@@ -171,6 +175,7 @@ if st.button("🚀 計算スタート", type="primary"):
         target_notional = capital * leverage
         valid_plans = []
         
+        # 組み合わせ生成
         buy_combos = []
         if len(buy_candidates) >= 3:
             for combo in itertools.combinations(buy_candidates, 3):
@@ -185,9 +190,15 @@ if st.button("🚀 計算スタート", type="primary"):
                 for wp in generate_weights(2): sell_combos.append({combo[i]: wp[i] for i in range(2)})
         for c in sell_candidates: sell_combos.append({c: 1.0})
         
+        # 探索ループ
         for b_pat in buy_combos:
+            # データの存在確認
+            if not all(ccy in betas for ccy in b_pat): continue
+
             b_beta = sum(betas.get(ccy, 0) * w for ccy, w in b_pat.items())
             for s_pat in sell_combos:
+                if not all(ccy in betas for ccy in s_pat): continue
+
                 s_beta = sum(betas.get(ccy, 0) * w for ccy, w in s_pat.items()) * -1
                 net_beta = b_beta + s_beta
                 
@@ -212,7 +223,7 @@ if st.button("🚀 計算スタート", type="primary"):
                     except: continue
 
         if not valid_plans:
-            st.error("❌ 条件に合う組み合わせが見つかりませんでした。")
+            st.error("❌ 条件に合う組み合わせが見つかりませんでした。βの条件を緩めるか、候補を増やしてください。")
         else:
             # 4. 結果表示
             valid_plans.sort(key=lambda x: x["swap"], reverse=True)
@@ -258,12 +269,14 @@ if st.button("🚀 計算スタート", type="primary"):
             total_pl = (daily_capital_pl + best_swap_val).cumsum()
             capital_only = daily_capital_pl.cumsum()
             
+            # 損益グラフ
             fig_bt = go.Figure()
             fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl.values, name='合計損益', line=dict(color='green', width=2)))
             fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only.values, name='為替損益のみ', line=dict(color='gray', dash='dot')))
             fig_bt.update_layout(title="📈 1年間の損益シミュレーション", height=400)
             st.plotly_chart(fig_bt, use_container_width=True)
 
+            # 相関グラフ
             buy_nav = (1 + buy_series).cumprod() * 100
             sell_nav = (1 + sell_series).cumprod() * 100
             
@@ -274,5 +287,5 @@ if st.button("🚀 計算スタート", type="primary"):
             st.plotly_chart(fig_corr, use_container_width=True)
             
             corr = buy_series.corr(sell_series)
-            if np.isnan(corr): corr = 0.0 # NaN対策
+            if np.isnan(corr): corr = 0.0
             st.info(f"💡 **相関係数: {corr:.4f}** (1.0に近いほどリスクヘッジが効いています)")
