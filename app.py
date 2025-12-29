@@ -30,7 +30,7 @@ DEFAULT_LOT_SIZE = {
 # --- 関数定義 ---
 
 @st.cache_data(ttl=3600)
-def fetch_data(days=1095): # 常に3年分取得
+def fetch_data(days=1095):
     """データ取得"""
     try:
         symbols = list(TICKER_MAP.values())
@@ -116,27 +116,37 @@ def generate_weights(n):
 with st.sidebar:
     st.header("⚙️ 設定パネル")
     
-    password = st.text_input("🔑 パスワード", type="password")
-    if password != "s6secret":
-        st.warning("パスワードを入力してください")
-        st.stop()
+    # ★変更点: パスワード入力によるモード分岐
+    password = st.text_input("🔑 パスワード (未入力でデモモード)", type="password")
+    
+    if password == "s6secret":
+        is_demo_mode = False
+        st.success("🔓 認証成功: フル機能モード")
+    else:
+        is_demo_mode = True
+        st.info("👀 デモモードで動作中 (通貨ペア制限あり)")
 
     capital = st.number_input("💰 運用資金 (円)", value=1000000, step=100000)
     leverage = st.number_input("⚙️ 目標レバレッジ (倍)", value=16.0, step=0.1)
 
+    # ★変更点: スワップ設定をここ（上の方）に移動
+    with st.expander("📝 スワップポイント設定", expanded=False):
+        swap_inputs = {}
+        for ccy, val in DEFAULT_SWAP.items():
+            swap_inputs[ccy] = st.number_input(f"{ccy}", value=float(val), step=0.1)
+
+    st.markdown("---")
     st.subheader("🛡️ リスク制御")
     
     calc_period_option = st.selectbox(
         "📊 β・相関の計算期間", 
         ["直近1年 (推奨)", "直近2年", "直近3年"], 
-        index=0,
-        help="最適化計算に使うデータの期間です。"
+        index=0
     )
     
-    target_beta = st.slider("許容するβの範囲 (±)", 0.01, 0.20, 0.05, step=0.01, help="推奨: 0.05以下")
-    target_corr = st.slider("最低相関係数", 0.0, 1.0, 0.80, step=0.05, help="推奨: 0.8以上")
+    target_beta = st.slider("許容するβの範囲 (±)", 0.01, 0.20, 0.05, step=0.01)
+    target_corr = st.slider("最低相関係数", 0.0, 1.0, 0.80, step=0.05)
     
-    st.markdown("---")
     st.caption("通貨保有比率の制限")
     other_limit = st.slider("🌍 TRY以外の最大比率制限 (%)", 10, 100, 40, step=10)
     try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 20, step=5)
@@ -144,11 +154,6 @@ with st.sidebar:
     st.subheader("🔢 構成通貨数")
     buy_count_range = st.slider("買い通貨ペア数 (範囲)", 1, 4, (2, 4))
     sell_count_range = st.slider("売り通貨ペア数 (範囲)", 1, 4, (2, 3))
-
-    with st.expander("📝 スワップポイント設定", expanded=False):
-        swap_inputs = {}
-        for ccy, val in DEFAULT_SWAP.items():
-            swap_inputs[ccy] = st.number_input(f"{ccy}", value=float(val), step=0.1)
 
     st.markdown("---")
     st.subheader("📈 グラフ表示設定")
@@ -161,15 +166,26 @@ with st.sidebar:
 # --- メイン画面 ---
 st.title("📱 S6戦略 自動最適化ツール")
 
+# ★変更点: モードに応じた通貨ペア候補の切り替え
+if is_demo_mode:
+    st.warning("🚧 現在は**デモモード**です。選択できる通貨ペアが制限されています。フル機能を使うにはサイドバーでパスワードを入力してください。")
+    # デモ用の候補 (TRY, MXN買い / USD売り)
+    buy_options = ["MXNJPY", "TRYJPY"]
+    buy_default = ["MXNJPY", "TRYJPY"]
+    sell_options = ["USDJPY"]
+    sell_default = ["USDJPY"]
+else:
+    # フル機能用の候補 (全通貨)
+    buy_options = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY"]
+    buy_default = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY"]
+    sell_options = ["USDJPY", "CHFJPY", "EURJPY"]
+    sell_default = ["USDJPY", "CHFJPY", "EURJPY"]
+
 col1, col2 = st.columns(2)
 with col1:
-    buy_candidates = st.multiselect("📈 買い候補", 
-                                    ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY"],
-                                    default=["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY"])
+    buy_candidates = st.multiselect("📈 買い候補", options=buy_options, default=buy_default)
 with col2:
-    sell_candidates = st.multiselect("📉 売り候補", 
-                                     ["USDJPY", "CHFJPY", "EURJPY"],
-                                     default=["USDJPY", "CHFJPY", "EURJPY"])
+    sell_candidates = st.multiselect("📉 売り候補", options=sell_options, default=sell_default)
 
 # 計算ボタン処理
 if st.button("🚀 計算スタート", type="primary"):
@@ -291,13 +307,12 @@ if st.button("🚀 計算スタート", type="primary"):
                     valid_plans.sort(key=lambda x: x["swap"], reverse=True)
                     best = valid_plans[0]
                     
-                    # 計算に使ったcapitalも保存しておく
                     st.session_state['results'] = {
                         'best': best,
                         'df_full': df_full,
                         'calc_period': calc_period_option,
                         'target_notional': target_notional,
-                        'capital': capital, # ★ここに追加
+                        'capital': capital,
                         'current_rates': current_rates
                     }
 
@@ -307,7 +322,7 @@ if 'results' in st.session_state:
     best = res['best']
     df_full = res['df_full']
     target_notional = res['target_notional']
-    calc_capital = res['capital'] # ★保存された元本を使用
+    calc_capital = res['capital']
     current_rates = res['current_rates']
     
     best_swap_val = best['swap'] if not np.isnan(best['swap']) else 0
@@ -338,7 +353,6 @@ if 'results' in st.session_state:
 
     st.markdown("---")
     
-    # グラフ描画（期間選択対応 ＆ ％表示）
     st.subheader(f"📊 バックテスト ({plot_period_option})")
     
     if "1年" in plot_period_option:
@@ -354,12 +368,10 @@ if 'results' in st.session_state:
     sell_series = pd.Series(0.0, index=df_plot.index)
     for ccy, w in best['sell'].items(): sell_series += df_plot[ccy] * w
     
-    # 損益計算
     daily_capital_pl = (buy_series - sell_series) * side_notional
     total_pl = (daily_capital_pl + best_swap_val).cumsum()
     capital_only = daily_capital_pl.cumsum()
     
-    # ★ここを修正: 元本に対する％比率に変換
     total_pl_pct = (total_pl / calc_capital) * 100
     capital_only_pct = (capital_only / calc_capital) * 100
     
@@ -371,7 +383,7 @@ if 'results' in st.session_state:
         title=f"損益推移 (対元本比率)", 
         height=400,
         yaxis_title="損益率 (%)",
-        yaxis_ticksuffix="%" # 軸目盛りに%をつける
+        yaxis_ticksuffix="%"
     )
     st.plotly_chart(fig_bt, use_container_width=True)
 
