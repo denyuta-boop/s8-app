@@ -93,7 +93,7 @@ def calculate_beta(asset_returns, benchmark_returns):
     return slope
 
 def generate_weights(n):
-    """精密モード: 10%刻みの重み生成 (2〜4通貨対応)"""
+    """精密モード: 10%刻みの重み生成"""
     weights = []
     if n == 1:
         return [{0: 1.0}]
@@ -104,9 +104,7 @@ def generate_weights(n):
             for j in range(1, 9-i):
                 k = 10 - i - j
                 if k > 0: weights.append({0: i/10, 1: j/10, 2: k/10})
-    # ★追加: 4通貨分散パターン
     elif n == 4:
-        # 計算量削減のため20%刻みも検討するが、一旦10%刻みで実装(Renderなら耐えるはず)
         for i in range(1, 8):
             for j in range(1, 8-i):
                 for k in range(1, 8-i-j):
@@ -129,8 +127,14 @@ with st.sidebar:
 
     st.subheader("🛡️ リスク制御")
     target_beta = st.slider("許容するβの範囲 (±)", 0.01, 0.20, 0.05, step=0.01, help="推奨: 0.05以下")
+    # ★追加: 相関係数のスライダー (初期値0.8)
+    target_corr = st.slider("最低相関係数", 0.0, 1.0, 0.80, step=0.05, help="買いと売りの動きの一致度。高いほど安全。推奨: 0.8以上")
     try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 100, step=10)
     
+    st.subheader("🔢 構成通貨数")
+    buy_count_range = st.slider("買い通貨ペア数 (範囲)", 1, 4, (2, 4))
+    sell_count_range = st.slider("売り通貨ペア数 (範囲)", 1, 4, (2, 3))
+
     with st.expander("📝 スワップポイント設定", expanded=False):
         swap_inputs = {}
         for ccy, val in DEFAULT_SWAP.items():
@@ -151,15 +155,15 @@ with col2:
 
 if st.button("🚀 計算スタート", type="primary"):
     
-    if len(buy_candidates) < 2 or len(sell_candidates) < 1:
-        st.error("⚠️ エラー: 買い候補は2つ以上、売り候補は1つ以上選んでください。")
+    if len(buy_candidates) < buy_count_range[0] or len(sell_candidates) < sell_count_range[0]:
+        st.error("⚠️ エラー: 候補通貨の数が、指定された最小構成数より少ないです。")
         st.stop()
 
-    with st.spinner("⏳ データ取得＆最適化計算中... (パターン数が多いと少し時間がかかります)"):
+    with st.spinner("⏳ データ取得＆最適化計算中..."):
         df_returns, current_rates, df_prices = fetch_data(days=730)
         
         if df_returns is None or df_returns.empty:
-            st.error("❌ データ取得エラー。Yahoo Financeからデータを取得できませんでした。")
+            st.error("❌ データ取得エラー。")
             st.stop()
             
         betas = {}
@@ -173,73 +177,116 @@ if st.button("🚀 計算スタート", type="primary"):
             
         target_notional = capital * leverage
         valid_plans = []
+
+        # --- 高速化のための事前計算 ---
         
-        # --- 組み合わせ生成ロジックの変更 ---
-        # 2通貨ペア, 3通貨ペア, 4通貨ペア をすべて試し、一番良いものを探す
-        buy_patterns_all = []
-        
-        # 探索するサイズ: 2〜4 (ただし候補数が足りない場合はそこまで)
-        max_size = min(4, len(buy_candidates))
-        
-        for size in range(2, max_size + 1):
+        # 1. 買いパターンの生成と事前計算
+        buy_precalc = []
+        for size in range(buy_count_range[0], min(buy_count_range[1], len(buy_candidates)) + 1):
             for combo in itertools.combinations(buy_candidates, size):
+                # データの存在チェック
+                if not all(ccy in betas for ccy in combo): continue
+
                 weights_list = generate_weights(size)
                 for wp in weights_list:
-                    # wpは {0: 0.1, 1: 0.9} のようなインデックスキーなので、通貨名キーに変換
                     pattern = {combo[i]: wp[i] for i in range(size)}
-                    buy_patterns_all.append(pattern)
-
-        # 売りは最大2通貨分散まで（複雑化しすぎるため）
-        sell_patterns_all = []
-        sell_max_size = min(2, len(sell_candidates))
-        for size in range(1, sell_max_size + 1):
-            for combo in itertools.combinations(sell_candidates, size):
-                if size == 1:
-                    sell_patterns_all.append({combo[0]: 1.0})
-                else:
-                    weights_list = generate_weights(size)
-                    for wp in weights_list:
-                        pattern = {combo[i]: wp[i] for i in range(size)}
-                        sell_patterns_all.append(pattern)
-        
-        # --- 総当たり計算 ---
-        for b_pat in buy_patterns_all:
-            # データ確認
-            if not all(ccy in betas for ccy in b_pat): continue
-
-            # TRY制限チェック
-            if "TRYJPY" in b_pat:
-                if b_pat["TRYJPY"] > (try_limit / 100): continue
-
-            b_beta = sum(betas.get(ccy, 0) * w for ccy, w in b_pat.items())
-            
-            for s_pat in sell_patterns_all:
-                if not all(ccy in betas for ccy in s_pat): continue
-                
-                s_beta = sum(betas.get(ccy, 0) * w for ccy, w in s_pat.items()) * -1
-                net_beta = b_beta + s_beta
-                
-                if abs(net_beta) < target_beta:
+                    
+                    # TRY制限チェック
+                    if "TRYJPY" in pattern:
+                        if pattern["TRYJPY"] > (try_limit / 100): continue
+                    
+                    # β計算
+                    b_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items())
+                    
+                    # 時系列データ計算（相関用）
+                    b_series = pd.Series(0.0, index=df_returns.index)
+                    for ccy, w in pattern.items():
+                         b_series += df_returns[ccy] * w
+                    
+                    # スワップ計算（買いのみ）
+                    daily_swap_buy = 0
+                    valid_swap = True
                     side_notional = target_notional / 2
-                    daily_swap = 0
                     try:
-                        for ccy, w in b_pat.items():
+                        for ccy, w in pattern.items():
                             rate = current_rates.get(ccy, 0)
-                            if rate == 0: continue
+                            if rate == 0: valid_swap = False; break
                             lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
-                            daily_swap += lots * swap_inputs.get(ccy, 0)
-                        for ccy, w in s_pat.items():
+                            daily_swap_buy += lots * swap_inputs.get(ccy, 0)
+                    except: valid_swap = False
+                    
+                    if valid_swap:
+                        buy_precalc.append({
+                            "pattern": pattern,
+                            "beta": b_beta,
+                            "series": b_series,
+                            "swap": daily_swap_buy
+                        })
+
+        # 2. 売りパターンの生成と事前計算
+        sell_precalc = []
+        for size in range(sell_count_range[0], min(sell_count_range[1], len(sell_candidates)) + 1):
+            for combo in itertools.combinations(sell_candidates, size):
+                if not all(ccy in betas for ccy in combo): continue
+
+                weights_list = generate_weights(size)
+                for wp in weights_list:
+                    pattern = {combo[i]: wp[i] for i in range(size)}
+                    
+                    # β計算 (売りなのでマイナス)
+                    s_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items()) * -1
+                    
+                    # 時系列データ
+                    s_series = pd.Series(0.0, index=df_returns.index)
+                    for ccy, w in pattern.items():
+                         s_series += df_returns[ccy] * w
+                    
+                    # スワップ計算（売りのみ）
+                    daily_swap_sell = 0
+                    valid_swap = True
+                    side_notional = target_notional / 2
+                    try:
+                        for ccy, w in pattern.items():
                             rate = current_rates.get(ccy, 0)
-                            if rate == 0: continue
+                            if rate == 0: valid_swap = False; break
                             lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
-                            daily_swap += lots * swap_inputs.get(ccy, 0)
-                        
-                        if np.isnan(daily_swap) or daily_swap == 0: continue
-                        valid_plans.append({"buy": b_pat, "sell": s_pat, "beta": net_beta, "swap": daily_swap})
-                    except: continue
+                            daily_swap_sell += lots * swap_inputs.get(ccy, 0)
+                    except: valid_swap = False
+
+                    if valid_swap:
+                        sell_precalc.append({
+                            "pattern": pattern,
+                            "beta": s_beta,
+                            "series": s_series,
+                            "swap": daily_swap_sell
+                        })
+
+        # 3. 総当たりマッチング (高速版)
+        for b_item in buy_precalc:
+            for s_item in sell_precalc:
+                
+                # 第1関門: βチェック
+                net_beta = b_item["beta"] + s_item["beta"]
+                if abs(net_beta) >= target_beta: continue
+                
+                # 第2関門: 相関チェック
+                corr = b_item["series"].corr(s_item["series"])
+                if np.isnan(corr): corr = 0
+                if corr < target_corr: continue
+                
+                # 合格したら合計スワップ計算
+                total_swap = b_item["swap"] + s_item["swap"]
+                
+                valid_plans.append({
+                    "buy": b_item["pattern"],
+                    "sell": s_item["pattern"],
+                    "beta": net_beta,
+                    "swap": total_swap,
+                    "corr": corr
+                })
 
         if not valid_plans:
-            st.error(f"❌ 条件(β < {target_beta})に合う組み合わせが見つかりませんでした。条件を緩めるか、候補を増やしてください。")
+            st.error(f"❌ 条件に合うプランが見つかりませんでした。\n(β < {target_beta}, 相関 > {target_corr})\n条件を緩めるか、候補を増やしてください。")
         else:
             valid_plans.sort(key=lambda x: x["swap"], reverse=True)
             best = valid_plans[0]
@@ -272,43 +319,32 @@ if st.button("🚀 計算スタート", type="primary"):
 
             st.markdown("---")
             
-            # グラフ用データ
+            # グラフ描画用にデータ再構築
             buy_series = pd.Series(0.0, index=df_returns.index)
-            valid_buy = True
             for ccy, w in best['buy'].items():
-                if ccy in df_returns.columns: 
-                    buy_series += df_returns[ccy] * w
-                else: valid_buy = False
+                 buy_series += df_returns[ccy] * w
             
             sell_series = pd.Series(0.0, index=df_returns.index)
-            valid_sell = True
             for ccy, w in best['sell'].items():
-                if ccy in df_returns.columns: 
-                    sell_series += df_returns[ccy] * w
-                else: valid_sell = False
+                 sell_series += df_returns[ccy] * w
             
-            if valid_buy and valid_sell:
-                daily_capital_pl = (buy_series - sell_series) * side_notional
-                total_pl = (daily_capital_pl + best_swap_val).cumsum()
-                capital_only = daily_capital_pl.cumsum()
-                
-                fig_bt = go.Figure()
-                fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl.values, name='合計損益', line=dict(color='green', width=2)))
-                fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only.values, name='為替損益のみ', line=dict(color='gray', dash='dot')))
-                fig_bt.update_layout(title="📈 1年間の損益シミュレーション", height=400)
-                st.plotly_chart(fig_bt, use_container_width=True)
+            daily_capital_pl = (buy_series - sell_series) * side_notional
+            total_pl = (daily_capital_pl + best_swap_val).cumsum()
+            capital_only = daily_capital_pl.cumsum()
+            
+            fig_bt = go.Figure()
+            fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl.values, name='合計損益', line=dict(color='green', width=2)))
+            fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only.values, name='為替損益のみ', line=dict(color='gray', dash='dot')))
+            fig_bt.update_layout(title="📈 1年間の損益シミュレーション", height=400)
+            st.plotly_chart(fig_bt, use_container_width=True)
 
-                buy_nav = (1 + buy_series).cumprod() * 100
-                sell_nav = (1 + sell_series).cumprod() * 100
-                
-                fig_corr = go.Figure()
-                fig_corr.add_trace(go.Scatter(x=buy_nav.index, y=buy_nav.values, name="買いバスケット", line=dict(color='blue')))
-                fig_corr.add_trace(go.Scatter(x=sell_nav.index, y=sell_nav.values, name="売りバスケット", line=dict(color='red')))
-                fig_corr.update_layout(title="🤝 相関チェック (動きが同じならOK)", height=400)
-                st.plotly_chart(fig_corr, use_container_width=True)
-                
-                corr = buy_series.corr(sell_series)
-                if np.isnan(corr): corr = 0.0
-                st.info(f"💡 **相関係数: {corr:.4f}** (1.0に近いほどリスクヘッジが効いています)")
-            else:
-                st.warning("⚠️ データの履歴不足により、グラフを描画できませんでした。")
+            buy_nav = (1 + buy_series).cumprod() * 100
+            sell_nav = (1 + sell_series).cumprod() * 100
+            
+            fig_corr = go.Figure()
+            fig_corr.add_trace(go.Scatter(x=buy_nav.index, y=buy_nav.values, name="買いバスケット", line=dict(color='blue')))
+            fig_corr.add_trace(go.Scatter(x=sell_nav.index, y=sell_nav.values, name="売りバスケット", line=dict(color='red')))
+            fig_corr.update_layout(title="🤝 相関チェック (動きが同じならOK)", height=400)
+            st.plotly_chart(fig_corr, use_container_width=True)
+            
+            st.info(f"💡 **相関係数: {best['corr']:.4f}** (1.0に近いほどリスクヘッジが効いています)")
