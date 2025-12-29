@@ -28,10 +28,8 @@ DEFAULT_SWAP = {
     "USDJPY": -150.0, "CHFJPY": 15.0, "EURJPY": -100.0
 }
 
-DEFAULT_LOT_SIZE = {
-    "MXNJPY": 10000, "PLNJPY": 10000, "CZKJPY": 10000, "ZARJPY": 10000,
-    "TRYJPY": 10000, "USDJPY": 10000, "CHFJPY": 10000, "EURJPY": 10000
-}
+# デフォルトのLot単位 (多くの業者は10000だが、ZARなどは10万の場合もある)
+DEFAULT_LOT_UNIT = 10000
 
 # --- 関数定義 ---
 
@@ -172,23 +170,33 @@ with st.sidebar:
     capital = st.number_input("💰 運用資金 (円)", value=1000000, step=100000)
     leverage = st.number_input("⚙️ 目標レバレッジ (倍)", value=16.0, step=0.1)
 
-    # ★UI改善: スワップ入力画面
-    with st.expander("📝 スワップポイント設定", expanded=False):
-        st.caption("※ご使用の取引会社の1日当たりの平均的な1lotあたりのスワップ金額（円）を入力してください。")
+    # ★UI改善: スワップ & Lot単位 入力画面
+    with st.expander("📝 スワップ & Lot単位設定", expanded=False):
+        st.caption("※ご使用の取引会社の平均的なスワップ(円)と、1Lotあたりの通貨数(単位)を入力してください。")
         swap_inputs = {}
+        lot_inputs = {} # ★Lot単位の辞書
         
         col_s1, col_s2 = st.columns(2)
         with col_s1:
             st.markdown("##### 🟢 買い (受取)")
             for ccy in BUY_GROUP:
-                val = DEFAULT_SWAP.get(ccy, 0.0)
-                swap_inputs[ccy] = st.number_input(f"{ccy}", value=float(val), step=0.1, key=f"swap_{ccy}")
+                val_swap = DEFAULT_SWAP.get(ccy, 0.0)
+                # 2列にしてスワップとLotを並べる
+                c1, c2 = st.columns([1.2, 1]) 
+                with c1:
+                    swap_inputs[ccy] = st.number_input(f"{ccy} Swap", value=float(val_swap), step=0.1, key=f"swap_{ccy}")
+                with c2:
+                    lot_inputs[ccy] = st.number_input(f"単位", value=DEFAULT_LOT_UNIT, step=1000, key=f"lot_{ccy}", help=f"{ccy}の1Lotあたりの通貨数")
         
         with col_s2:
             st.markdown("##### 🔴 売り (支払)")
             for ccy in SELL_GROUP:
-                val = DEFAULT_SWAP.get(ccy, 0.0)
-                swap_inputs[ccy] = st.number_input(f"{ccy}", value=float(val), step=0.1, key=f"swap_{ccy}")
+                val_swap = DEFAULT_SWAP.get(ccy, 0.0)
+                c1, c2 = st.columns([1.2, 1])
+                with c1:
+                    swap_inputs[ccy] = st.number_input(f"{ccy} Swap", value=float(val_swap), step=0.1, key=f"swap_{ccy}")
+                with c2:
+                    lot_inputs[ccy] = st.number_input(f"単位", value=DEFAULT_LOT_UNIT, step=1000, key=f"lot_{ccy}", help=f"{ccy}の1Lotあたりの通貨数")
 
     st.markdown("---")
     st.subheader("🛡️ リスク制御")
@@ -308,7 +316,9 @@ if st.button("🚀 計算スタート", type="primary"):
                             for ccy, w in pattern.items():
                                 rate = current_rates.get(ccy, 0)
                                 if rate == 0: valid_swap = False; break
-                                lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
+                                # ★修正: ユーザー設定のLot単位を使用
+                                unit_size = lot_inputs.get(ccy, 10000)
+                                lots = (side_notional * w) / (rate * unit_size)
                                 daily_swap_buy += lots * swap_inputs.get(ccy, 0)
                         except: valid_swap = False
                         
@@ -336,7 +346,9 @@ if st.button("🚀 計算スタート", type="primary"):
                             for ccy, w in pattern.items():
                                 rate = current_rates.get(ccy, 0)
                                 if rate == 0: valid_swap = False; break
-                                lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
+                                # ★修正: ユーザー設定のLot単位を使用
+                                unit_size = lot_inputs.get(ccy, 10000)
+                                lots = (side_notional * w) / (rate * unit_size)
                                 daily_swap_sell += lots * swap_inputs.get(ccy, 0)
                         except: valid_swap = False
 
@@ -383,7 +395,8 @@ if st.button("🚀 計算スタート", type="primary"):
                 st.session_state['results'] = {
                     'best': final_best, 'is_fallback': is_fallback,
                     'df_full': df_full, 'calc_period': calc_period_option,
-                    'target_notional': target_notional, 'capital': capital, 'current_rates': current_rates
+                    'target_notional': target_notional, 'capital': capital, 'current_rates': current_rates,
+                    'lot_inputs': lot_inputs # 保存
                 }
 
 # --- 結果表示 ---
@@ -395,6 +408,8 @@ if 'results' in st.session_state:
     target_notional = res['target_notional']
     calc_capital = res['capital']
     current_rates = res['current_rates']
+    lot_inputs = res.get('lot_inputs', {k: 10000 for k in TICKER_MAP.keys()}) # Lot単位を取得
+    
     best_swap_val = best['swap'] if not np.isnan(best['swap']) else 0
 
     if is_fallback:
@@ -417,13 +432,15 @@ if 'results' in st.session_state:
     for ccy, w in best['buy'].items():
         rate = current_rates.get(ccy, 0)
         if rate > 0:
-            lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
-            orders.append({"売買": "買い", "通貨ペア": ccy, "比率": f"{w*100:.0f}%", "推奨ロット": round(lots, 2)})
+            unit_size = lot_inputs.get(ccy, 10000)
+            lots = (side_notional * w) / (rate * unit_size)
+            orders.append({"売買": "買い", "通貨ペア": ccy, "比率": f"{w*100:.0f}%", "推奨ロット": round(lots, 2), "1Lot単位": f"{unit_size}通貨"})
     for ccy, w in best['sell'].items():
         rate = current_rates.get(ccy, 0)
         if rate > 0:
-            lots = (side_notional * w) / (rate * DEFAULT_LOT_SIZE[ccy])
-            orders.append({"売買": "売り", "通貨ペア": ccy, "比率": f"{w*100:.0f}%", "推奨ロット": round(lots, 2)})
+            unit_size = lot_inputs.get(ccy, 10000)
+            lots = (side_notional * w) / (rate * unit_size)
+            orders.append({"売買": "売り", "通貨ペア": ccy, "比率": f"{w*100:.0f}%", "推奨ロット": round(lots, 2), "1Lot単位": f"{unit_size}通貨"})
     st.dataframe(pd.DataFrame(orders), hide_index=True)
 
     st.markdown("---")
