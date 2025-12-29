@@ -30,8 +30,8 @@ DEFAULT_LOT_SIZE = {
 # --- 関数定義 ---
 
 @st.cache_data(ttl=3600)
-def fetch_data(days=730):
-    """データ取得 (デフォルト2年分)"""
+def fetch_data(days=1095): # 常に3年分(約1095日)取得しておく
+    """データ取得"""
     try:
         symbols = list(TICKER_MAP.values())
         data = yf.download(symbols, period=f"{days}d", progress=False, auto_adjust=False)
@@ -93,7 +93,6 @@ def calculate_beta(asset_returns, benchmark_returns):
     return slope
 
 def generate_weights(n):
-    """精密モード: 10%刻みの重み生成"""
     weights = []
     if n == 1:
         return [{0: 1.0}]
@@ -126,14 +125,24 @@ with st.sidebar:
     leverage = st.number_input("⚙️ 目標レバレッジ (倍)", value=16.0, step=0.1)
 
     st.subheader("🛡️ リスク制御")
+    
+    # ★追加: β計算期間の選択 (プロ推奨の1年をデフォルトに)
+    calc_period_option = st.selectbox(
+        "📊 β・相関の計算期間", 
+        ["直近1年 (推奨)", "直近2年", "直近3年"], 
+        index=0,
+        help="今の相場環境に合わせるなら「直近1年」がおすすめです。"
+    )
+    
     target_beta = st.slider("許容するβの範囲 (±)", 0.01, 0.20, 0.05, step=0.01, help="推奨: 0.05以下")
     target_corr = st.slider("最低相関係数", 0.0, 1.0, 0.80, step=0.05, help="買いと売りの動きの一致度。推奨: 0.8以上")
     
     st.markdown("---")
     st.caption("通貨保有比率の制限")
     
-    other_limit = st.slider("🌍 TRY以外の最大比率制限 (%)", 30, 100, 70, step=10, help="特定の通貨への集中を防ぎます。")
-    try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 100, step=10)
+    # ★変更: デフォルト値を厳しめに修正 (40% / 20%)
+    other_limit = st.slider("🌍 TRY以外の最大比率制限 (%)", 10, 100, 40, step=10, help="1つの通貨に集中するのを防ぎます。40%にすると最低3通貨に分散されます。")
+    try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, 20, step=5)
     
     st.subheader("🔢 構成通貨数")
     buy_count_range = st.slider("買い通貨ペア数 (範囲)", 1, 4, (2, 4))
@@ -164,28 +173,39 @@ if st.button("🚀 計算スタート", type="primary"):
         st.stop()
 
     with st.spinner("⏳ データ取得＆最適化計算中..."):
-        # グラフ表示に合わせて2年分(730日)を取得
-        df_returns, current_rates, df_prices = fetch_data(days=730)
+        # 常に3年分取得
+        df_full, current_rates, df_prices = fetch_data(days=1095)
         
-        if df_returns is None or df_returns.empty:
+        if df_full is None or df_full.empty:
             st.error("❌ データ取得エラー。")
             st.stop()
-            
+        
+        # ★計算期間の切り出し処理
+        if "1年" in calc_period_option:
+            calc_days = 250
+        elif "2年" in calc_period_option:
+            calc_days = 500
+        else:
+            calc_days = 750
+        
+        # 最適化計算には、指定期間(直近N日)のデータだけを使う
+        df_calc = df_full.tail(calc_days)
+        
         betas = {}
-        if "USDJPY" not in df_returns.columns:
-            st.error(f"❌ USDJPYデータ不足 (取得列: {list(df_returns.columns)})")
+        if "USDJPY" not in df_calc.columns:
+            st.error(f"❌ USDJPYデータ不足 (取得列: {list(df_calc.columns)})")
             st.stop()
             
-        for col in df_returns.columns:
+        for col in df_calc.columns:
             if col == "USDJPY": betas[col] = 1.0
-            else: betas[col] = calculate_beta(df_returns[col], df_returns["USDJPY"])
+            else: betas[col] = calculate_beta(df_calc[col], df_calc["USDJPY"])
             
         target_notional = capital * leverage
         valid_plans = []
 
         # --- 高速化のための事前計算 ---
         
-        # 1. 買いパターンの生成と事前計算
+        # 1. 買いパターンの生成
         buy_precalc = []
         for size in range(buy_count_range[0], min(buy_count_range[1], len(buy_candidates)) + 1):
             for combo in itertools.combinations(buy_candidates, size):
@@ -207,9 +227,10 @@ if st.button("🚀 計算スタート", type="primary"):
 
                     b_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items())
                     
-                    b_series = pd.Series(0.0, index=df_returns.index)
+                    # 時系列データ (計算用期間で作成)
+                    b_series = pd.Series(0.0, index=df_calc.index)
                     for ccy, w in pattern.items():
-                         b_series += df_returns[ccy] * w
+                         b_series += df_calc[ccy] * w
                     
                     daily_swap_buy = 0
                     valid_swap = True
@@ -230,7 +251,7 @@ if st.button("🚀 計算スタート", type="primary"):
                             "swap": daily_swap_buy
                         })
 
-        # 2. 売りパターンの生成と事前計算
+        # 2. 売りパターンの生成
         sell_precalc = []
         for size in range(sell_count_range[0], min(sell_count_range[1], len(sell_candidates)) + 1):
             for combo in itertools.combinations(sell_candidates, size):
@@ -241,9 +262,9 @@ if st.button("🚀 計算スタート", type="primary"):
                     pattern = {combo[i]: wp[i] for i in range(size)}
                     
                     s_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items()) * -1
-                    s_series = pd.Series(0.0, index=df_returns.index)
+                    s_series = pd.Series(0.0, index=df_calc.index)
                     for ccy, w in pattern.items():
-                         s_series += df_returns[ccy] * w
+                         s_series += df_calc[ccy] * w
                     
                     daily_swap_sell = 0
                     valid_swap = True
@@ -286,7 +307,7 @@ if st.button("🚀 計算スタート", type="primary"):
                 })
 
         if not valid_plans:
-            st.error(f"❌ 条件に合うプランが見つかりませんでした。\n・β < {target_beta}\n・相関 > {target_corr}\n・通貨比率制限あり\n\n条件を緩めるか、候補を増やしてください。")
+            st.error(f"❌ 条件に合うプランが見つかりませんでした。\n(β < {target_beta}, 相関 > {target_corr})\n条件を緩めるか、候補を増やしてください。")
         else:
             valid_plans.sort(key=lambda x: x["swap"], reverse=True)
             best = valid_plans[0]
@@ -295,7 +316,8 @@ if st.button("🚀 計算スタート", type="primary"):
             if np.isnan(best_swap_val): best_swap_val = 0
 
             st.success("🎉 計算完了！最適なプランが見つかりました")
-            
+            st.info(f"最適化基準: {calc_period_option} のデータを使用")
+
             m1, m2, m3 = st.columns(3)
             m1.metric("💰 予想日次スワップ", f"¥{int(best_swap_val):,}")
             m1.metric("📈 予想年利", f"{(best_swap_val * 365 / capital * 100):.1f}%")
@@ -319,14 +341,26 @@ if st.button("🚀 計算スタート", type="primary"):
 
             st.markdown("---")
             
-            # グラフ描画
-            buy_series = pd.Series(0.0, index=df_returns.index)
-            for ccy, w in best['buy'].items():
-                 buy_series += df_returns[ccy] * w
+            # --- グラフ表示 ---
+            st.subheader("📊 バックテスト (シミュレーション)")
             
-            sell_series = pd.Series(0.0, index=df_returns.index)
+            # 全期間(df_full)を使ってグラフを描画する
+            plot_period = st.selectbox("📅 表示期間", ["1年", "2年", "3年 (全期間)"], index=2)
+            
+            if "1年" in plot_period:
+                df_plot = df_full.tail(250)
+            elif "2年" in plot_period:
+                df_plot = df_full.tail(500)
+            else:
+                df_plot = df_full
+            
+            buy_series = pd.Series(0.0, index=df_plot.index)
+            for ccy, w in best['buy'].items():
+                 buy_series += df_plot[ccy] * w
+            
+            sell_series = pd.Series(0.0, index=df_plot.index)
             for ccy, w in best['sell'].items():
-                 sell_series += df_returns[ccy] * w
+                 sell_series += df_plot[ccy] * w
             
             daily_capital_pl = (buy_series - sell_series) * side_notional
             total_pl = (daily_capital_pl + best_swap_val).cumsum()
@@ -335,8 +369,7 @@ if st.button("🚀 計算スタート", type="primary"):
             fig_bt = go.Figure()
             fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl.values, name='合計損益', line=dict(color='green', width=2)))
             fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only.values, name='為替損益のみ', line=dict(color='gray', dash='dot')))
-            # ★ここを修正しました
-            fig_bt.update_layout(title="📈 過去2年間の損益シミュレーション (バックテスト)", height=400)
+            fig_bt.update_layout(title=f"📈 損益シミュレーション ({plot_period})", height=400)
             st.plotly_chart(fig_bt, use_container_width=True)
 
             buy_nav = (1 + buy_series).cumprod() * 100
@@ -348,4 +381,4 @@ if st.button("🚀 計算スタート", type="primary"):
             fig_corr.update_layout(title="🤝 相関チェック (動きが同じならOK)", height=400)
             st.plotly_chart(fig_corr, use_container_width=True)
             
-            st.info(f"💡 **相関係数: {best['corr']:.4f}** (1.0に近いほどリスクヘッジが効いています)")
+            st.info(f"💡 **最適化期間の相関係数: {best['corr']:.4f}** (1.0に近いほどリスクヘッジが効いています)")
