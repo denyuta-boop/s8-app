@@ -150,7 +150,6 @@ with st.sidebar:
         for ccy, val in DEFAULT_SWAP.items():
             swap_inputs[ccy] = st.number_input(f"{ccy}", value=float(val), step=0.1)
 
-    # ★移動しました: グラフ表示期間の設定 (初期値: 直近1年)
     st.markdown("---")
     st.subheader("📈 グラフ表示設定")
     plot_period_option = st.radio(
@@ -180,13 +179,11 @@ if st.button("🚀 計算スタート", type="primary"):
         st.stop()
 
     with st.spinner("⏳ データ取得＆最適化計算中..."):
-        # 3年分取得
         df_full, current_rates, df_prices = fetch_data(days=1095)
         
         if df_full is None or df_full.empty:
             st.error("❌ データ取得エラー。")
         else:
-            # 計算期間の切り出し
             if "1年" in calc_period_option:
                 calc_days = 250
             elif "2年" in calc_period_option:
@@ -216,7 +213,7 @@ if st.button("🚀 計算スタート", type="primary"):
                         weights_list = generate_weights(size)
                         for wp in weights_list:
                             pattern = {combo[i]: wp[i] for i in range(size)}
-                            # 制限チェック
+                            
                             is_valid_weight = True
                             for ccy, weight in pattern.items():
                                 if ccy == "TRYJPY":
@@ -226,7 +223,6 @@ if st.button("🚀 計算スタート", type="primary"):
                             if not is_valid_weight: continue
 
                             b_beta = sum(betas.get(ccy, 0) * w for ccy, w in pattern.items())
-                            # 計算用系列
                             b_series = pd.Series(0.0, index=df_calc.index)
                             for ccy, w in pattern.items(): b_series += df_calc[ccy] * w
                             
@@ -288,28 +284,30 @@ if st.button("🚀 計算スタート", type="primary"):
                             "beta": net_beta, "swap": b_item["swap"] + s_item["swap"], "corr": corr
                         })
 
-                # 結果をSession Stateに保存
                 if not valid_plans:
                     st.error(f"❌ 条件に合うプランが見つかりませんでした。\n(β < {target_beta}, 相関 > {target_corr})")
                     if 'results' in st.session_state: del st.session_state['results']
                 else:
                     valid_plans.sort(key=lambda x: x["swap"], reverse=True)
                     best = valid_plans[0]
-                    # ここで必要なデータだけ保存
+                    
+                    # 計算に使ったcapitalも保存しておく
                     st.session_state['results'] = {
                         'best': best,
                         'df_full': df_full,
                         'calc_period': calc_period_option,
                         'target_notional': target_notional,
+                        'capital': capital, # ★ここに追加
                         'current_rates': current_rates
                     }
 
-# --- 結果表示 (セッションにデータがあれば常に表示) ---
+# --- 結果表示 ---
 if 'results' in st.session_state:
     res = st.session_state['results']
     best = res['best']
     df_full = res['df_full']
     target_notional = res['target_notional']
+    calc_capital = res['capital'] # ★保存された元本を使用
     current_rates = res['current_rates']
     
     best_swap_val = best['swap'] if not np.isnan(best['swap']) else 0
@@ -319,7 +317,7 @@ if 'results' in st.session_state:
 
     m1, m2, m3 = st.columns(3)
     m1.metric("💰 予想日次スワップ", f"¥{int(best_swap_val):,}")
-    m1.metric("📈 予想年利", f"{(best_swap_val * 365 / capital * 100):.1f}%")
+    m1.metric("📈 予想年利", f"{(best_swap_val * 365 / calc_capital * 100):.1f}%")
     m2.metric("⚖️ ポートフォリオβ", f"{best['beta']:.4f}")
     m3.metric("🛡️ 必要証拠金 (目安)", f"¥{int(target_notional / 25):,}")
 
@@ -340,7 +338,7 @@ if 'results' in st.session_state:
 
     st.markdown("---")
     
-    # グラフ描画（サイドバーの選択に合わせてデータを切り出す）
+    # グラフ描画（期間選択対応 ＆ ％表示）
     st.subheader(f"📊 バックテスト ({plot_period_option})")
     
     if "1年" in plot_period_option:
@@ -356,14 +354,25 @@ if 'results' in st.session_state:
     sell_series = pd.Series(0.0, index=df_plot.index)
     for ccy, w in best['sell'].items(): sell_series += df_plot[ccy] * w
     
+    # 損益計算
     daily_capital_pl = (buy_series - sell_series) * side_notional
     total_pl = (daily_capital_pl + best_swap_val).cumsum()
     capital_only = daily_capital_pl.cumsum()
     
+    # ★ここを修正: 元本に対する％比率に変換
+    total_pl_pct = (total_pl / calc_capital) * 100
+    capital_only_pct = (capital_only / calc_capital) * 100
+    
     fig_bt = go.Figure()
-    fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl.values, name='合計損益', line=dict(color='green', width=2)))
-    fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only.values, name='為替損益のみ', line=dict(color='gray', dash='dot')))
-    fig_bt.update_layout(title=f"損益推移", height=400)
+    fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl_pct.values, name='合計損益 (%)', line=dict(color='green', width=2)))
+    fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only_pct.values, name='為替損益のみ (%)', line=dict(color='gray', dash='dot')))
+    
+    fig_bt.update_layout(
+        title=f"損益推移 (対元本比率)", 
+        height=400,
+        yaxis_title="損益率 (%)",
+        yaxis_ticksuffix="%" # 軸目盛りに%をつける
+    )
     st.plotly_chart(fig_bt, use_container_width=True)
 
     buy_nav = (1 + buy_series).cumprod() * 100
