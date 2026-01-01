@@ -419,7 +419,7 @@ if 'results' in st.session_state:
     m1.metric("💰 予想日次スワップ", f"¥{int(best_swap_val):,}")
     m1.metric("📈 予想年利", f"{(best_swap_val * 365 / calc_capital * 100):.1f}%")
     m2.metric("⚖️ ポートフォリオβ", f"{best['beta']:.4f}")
-    m3.metric("🛡️ 必要証拠金 (目安)", f"¥{int(target_notional / 25):,}")
+    m3.metric("🛡️ 最低必要証拠金 (維持率100%)", f"¥{int(target_notional / 25):,}")
 
     st.subheader("📋 注文レシピ")
     orders = []
