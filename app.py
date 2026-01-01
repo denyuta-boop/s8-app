@@ -162,7 +162,7 @@ with st.sidebar:
         st.info("👀 デモモードで動作中")
         
         default_other_limit = 100
-        default_try_limit = 100
+        default_try_limit = 40
         default_buy_range = (1, 2)
         default_sell_range = (1, 1)
 
