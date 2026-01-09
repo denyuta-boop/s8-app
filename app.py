@@ -14,17 +14,16 @@ st.set_page_config(page_title="S8戦略 自動最適化ツール", layout="wide"
 TICKER_MAP = {
     "USDJPY": "USDJPY=X", "MXNJPY": "MXNJPY=X", "PLNJPY": "PLNJPY=X",
     "CZKJPY": "CZKJPY=X", "CHFJPY": "CHFJPY=X", "ZARJPY": "ZARJPY=X",
-    "TRYJPY": "TRYJPY=X", "EURJPY": "EURJPY=X"
+    "TRYJPY": "TRYJPY=X", "EURJPY": "EURJPY=X",
+    "HUFJPY": "HUFJPY=X"  # 追加
 }
 
-# 買い対象通貨 (受取スワップ)
-BUY_GROUP = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY"]
-# 売り対象通貨 (支払スワップ)
-SELL_GROUP = ["USDJPY", "CHFJPY", "EURJPY"]
+BUY_GROUP = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY", "HUFJPY"] # 追加
 
 DEFAULT_SWAP = {
     "MXNJPY": 11.1, "PLNJPY": 35.0, "ZARJPY": 10.1, "TRYJPY": 26.1,
-    "CZKJPY": 5.0,
+    "CZKJPY": 5.0, 
+    "HUFJPY": 4.0,  # 追加（1Lotあたり4円）
     "USDJPY": -130.0, "CHFJPY": 1.0, "EURJPY": -65.0
 }
 
@@ -174,16 +173,19 @@ with st.sidebar:
         swap_inputs = {}
         lot_inputs = {}
         
-        col_s1, col_s2 = st.columns(2)
+        # サイドバー内のループ部分を修正
         with col_s1:
             st.markdown("##### 🟢 買い (受取)")
             for ccy in BUY_GROUP:
                 val_swap = DEFAULT_SWAP.get(ccy, 0.0)
+                # HUFJPYの場合は100,000、それ以外は10,000を初期値にする
+                default_unit = 100000 if ccy == "HUFJPY" else 10000
+                
                 c1, c2 = st.columns([1.2, 1]) 
                 with c1:
                     swap_inputs[ccy] = st.number_input(f"{ccy} Swap", value=float(val_swap), step=0.1, key=f"swap_{ccy}")
                 with c2:
-                    lot_inputs[ccy] = st.number_input(f"単位", value=DEFAULT_LOT_UNIT, step=1000, key=f"lot_{ccy}", help=f"{ccy}の1Lotあたりの通貨数")
+                    lot_inputs[ccy] = st.number_input(f"単位", value=default_unit, step=1000, key=f"lot_{ccy}")
         
         with col_s2:
             st.markdown("##### 🔴 売り (支払)")
