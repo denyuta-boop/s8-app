@@ -15,15 +15,15 @@ TICKER_MAP = {
     "USDJPY": "USDJPY=X", "MXNJPY": "MXNJPY=X", "PLNJPY": "PLNJPY=X",
     "CZKJPY": "CZKJPY=X", "CHFJPY": "CHFJPY=X", "ZARJPY": "ZARJPY=X",
     "TRYJPY": "TRYJPY=X", "EURJPY": "EURJPY=X",
-    "HUFJPY": "HUFJPY=X"  # 追加
+    "HUFJPY": "HUFJPY=X"  # HUFJPYを追加
 }
 
-BUY_GROUP = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY", "HUFJPY"] # 追加
+BUY_GROUP = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY", "HUFJPY"]
 
 DEFAULT_SWAP = {
     "MXNJPY": 11.1, "PLNJPY": 35.0, "ZARJPY": 10.1, "TRYJPY": 26.1,
     "CZKJPY": 5.0, 
-    "HUFJPY": 4.0,  # 追加（1Lotあたり4円）
+    "HUFJPY": 4.0,  # 1Lot(10万通貨)あたり4円
     "USDJPY": -130.0, "CHFJPY": 1.0, "EURJPY": -65.0
 }
 
@@ -173,7 +173,9 @@ with st.sidebar:
         swap_inputs = {}
         lot_inputs = {}
         
-        # サイドバー内のループ部分を修正
+        # --- 修正箇所：列の定義 ---
+        col_s1, col_s2 = st.columns(2)
+        
         with col_s1:
             st.markdown("##### 🟢 買い (受取)")
             for ccy in BUY_GROUP:
@@ -195,7 +197,7 @@ with st.sidebar:
                 with c1:
                     swap_inputs[ccy] = st.number_input(f"{ccy} Swap", value=float(val_swap), step=0.1, key=f"swap_{ccy}")
                 with c2:
-                    lot_inputs[ccy] = st.number_input(f"単位", value=DEFAULT_LOT_UNIT, step=1000, key=f"lot_{ccy}", help=f"{ccy}の1Lotあたりの通貨数")
+                    lot_inputs[ccy] = st.number_input(f"単位", value=DEFAULT_LOT_UNIT, step=1000, key=f"lot_{ccy}")
 
     st.markdown("---")
     st.subheader("🛡️ リスク制御")
@@ -235,8 +237,8 @@ if is_demo_mode:
     sell_options = ["USDJPY"]
     sell_default = ["USDJPY"]
 else:
-    buy_options = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY"]
-    buy_default = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY"]
+    buy_options = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY", "HUFJPY"]
+    buy_default = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY", "HUFJPY"]
     sell_options = ["USDJPY", "CHFJPY", "EURJPY"]
     sell_default = ["USDJPY", "CHFJPY", "EURJPY"]
 
@@ -386,7 +388,7 @@ if st.button("🚀 計算スタート", type="primary"):
             if final_best is None:
                 st.error("❌ 計算可能な組み合わせが1つも見つかりませんでした。")
                 if total_combinations > 0 and rejected_by_ratio == total_combinations:
-                     st.warning(f"💡 **原因診断:** 通貨保有比率の制限（TRY {try_limit}%, その他 {other_limit}%）が厳しすぎて、すべての組み合わせが却下されました。スライダーで制限を緩めてください。")
+                     st.warning(f"💡 **原因診断:** 通貨保有比率の制限が厳しすぎます。制限を緩めてください。")
                 if 'results' in st.session_state: del st.session_state['results']
             else:
                 st.session_state['results'] = {
@@ -410,52 +412,36 @@ if 'results' in st.session_state:
     best_swap_val = best['swap'] if not np.isnan(best['swap']) else 0
 
     if is_fallback:
-        st.warning("⚠️ 条件（β・相関）を完全に満たすプランが見つかりませんでした。")
-        st.markdown(f"**参考として、条件外の中で最もβが低く安全なプランを表示します。**")
+        st.warning("⚠️ 条件を完全に満たすプランが見つかりませんでした。最も安全な代替案を表示します。")
     else:
-        st.success("🎉 計算完了！最適なプランが見つかりました")
+        st.success("🎉 最適なプランが見つかりました")
     
-    st.info(f"最適化基準: {res['calc_period']} のデータを使用")
-
     m1, m2, m3 = st.columns(3)
     m1.metric("💰 予想日次スワップ", f"¥{int(best_swap_val):,}")
     m1.metric("📈 予想年利", f"{(best_swap_val * 365 / calc_capital * 100):.1f}%")
     m2.metric("⚖️ ポートフォリオβ", f"{best['beta']:.4f}")
-    m3.metric("🛡️ 最低必要証拠金 (維持率100%)", f"¥{int(target_notional / 25):,}")
+    m3.metric("🛡️ 維持率100%証拠金", f"¥{int(target_notional / 25):,}")
 
     st.subheader("📋 注文レシピ")
     orders = []
     side_notional = target_notional / 2
-    for ccy, w in best['buy'].items():
-        rate = current_rates.get(ccy, 0)
-        if rate > 0:
-            unit_size = lot_inputs.get(ccy, 10000)
-            lots = (side_notional * w) / (rate * unit_size)
-            # ★変更箇所: 金額(円)を追加、1Lot単位を削除
-            amount_jpy = side_notional * w
-            orders.append({
-                "売買": "買い",
-                "通貨ペア": ccy,
-                "比率": f"{w*100:.0f}%",
-                "金額(円)": f"¥{int(amount_jpy):,}",
-                "推奨ロット": round(lots, 2)
-            })
-    for ccy, w in best['sell'].items():
-        rate = current_rates.get(ccy, 0)
-        if rate > 0:
-            unit_size = lot_inputs.get(ccy, 10000)
-            lots = (side_notional * w) / (rate * unit_size)
-            # ★変更箇所: 金額(円)を追加、1Lot単位を削除
-            amount_jpy = side_notional * w
-            orders.append({
-                "売買": "売り",
-                "通貨ペア": ccy,
-                "比率": f"{w*100:.0f}%",
-                "金額(円)": f"¥{int(amount_jpy):,}",
-                "推奨ロット": round(lots, 2)
-            })
+    for side, side_name in [(best['buy'], "買い"), (best['sell'], "売り")]:
+        for ccy, w in side.items():
+            rate = current_rates.get(ccy, 0)
+            if rate > 0:
+                unit_size = lot_inputs.get(ccy, 10000)
+                lots = (side_notional * w) / (rate * unit_size)
+                amount_jpy = side_notional * w
+                orders.append({
+                    "売買": side_name,
+                    "通貨ペア": ccy,
+                    "比率": f"{w*100:.0f}%",
+                    "金額(円)": f"¥{int(amount_jpy):,}",
+                    "推奨ロット": round(lots, 2)
+                })
     st.dataframe(pd.DataFrame(orders), hide_index=True)
 
+    # --- グラフ描画 ---
     st.markdown("---")
     st.subheader(f"📊 バックテスト ({plot_period_option})")
     
@@ -469,24 +455,17 @@ if 'results' in st.session_state:
     for ccy, w in best['sell'].items(): sell_series += df_plot[ccy] * w
     
     total_pl = ((buy_series - sell_series) * side_notional + best_swap_val).cumsum()
-    capital_only = ((buy_series - sell_series) * side_notional).cumsum()
-    
     total_pl_pct = (total_pl / calc_capital) * 100
-    capital_only_pct = (capital_only / calc_capital) * 100
     
     fig_bt = go.Figure()
-    fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl_pct.values, name='合計損益 (%)', line=dict(color='green', width=2)))
-    fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only_pct.values, name='為替損益のみ (%)', line=dict(color='gray', dash='dot')))
-    fig_bt.update_layout(title=f"損益推移 (対元本比率)", height=400, yaxis_title="損益率 (%)", yaxis_ticksuffix="%")
+    fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl_pct.values, name='合計損益 (%)', line=dict(color='green')))
+    fig_bt.update_layout(title="損益推移 (対元本比率)", height=400, yaxis_ticksuffix="%")
     st.plotly_chart(fig_bt, use_container_width=True)
 
     buy_nav = (1 + buy_series).cumprod() * 100
     sell_nav = (1 + sell_series).cumprod() * 100
-    
     fig_corr = go.Figure()
     fig_corr.add_trace(go.Scatter(x=buy_nav.index, y=buy_nav.values, name="買いバスケット", line=dict(color='blue')))
     fig_corr.add_trace(go.Scatter(x=sell_nav.index, y=sell_nav.values, name="売りバスケット", line=dict(color='red')))
     fig_corr.update_layout(title="動きの比較 (相関)", height=400)
     st.plotly_chart(fig_corr, use_container_width=True)
-    
-    st.info(f"💡 **最適化期間({res['calc_period']})での相関係数: {best['corr']:.4f}**")
