@@ -141,6 +141,16 @@ def generate_weights(n):
                     l = 10 - i - j - k
                     if l > 0:
                         weights.append({0: i/10, 1: j/10, 2: k/10, 3: l/10})
+    # --- ここから追加 ---
+    elif n == 5:
+        for i in range(1, 7):
+            for j in range(1, 7-i):
+                for k in range(1, 7-i-j):
+                    for l in range(1, 7-i-j-k):
+                        m = 10 - i - j - k - l
+                        if m > 0:
+                            weights.append({0: i/10, 1: j/10, 2: k/10, 3: l/10, 4: m/10})
+    # --- ここまで追加 ---
     return weights
 
 # --- サイドバー設定 ---
@@ -212,7 +222,7 @@ with st.sidebar:
     try_limit = st.slider("🇹🇷 TRYJPYの最大比率制限 (%)", 0, 100, default_try_limit, step=5)
     
     st.subheader("🔢 構成通貨数")
-    buy_count_range = st.slider("買い通貨ペア数 (範囲)", 1, 4, default_buy_range)
+    buy_count_range = st.slider("買い通貨ペア数 (範囲)", 1, 5, default_buy_range)
     sell_count_range = st.slider("売り通貨ペア数 (範囲)", 1, 4, default_sell_range)
 
     st.markdown("---")
