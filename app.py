@@ -409,6 +409,21 @@ if 'results' in st.session_state:
     res = st.session_state['results']
     best = res['best']
     is_fallback = res.get('is_fallback', False)
+    # ★★★★★ ここに挿入！ ★★★★★
+    st.subheader("採用通貨の年率標準偏差（最適プラン内）")
+    adopted_risks = []
+    for ccy, weight in {**best['buy'], **best['sell']}.items():
+        if ccy in df_calc.columns:
+            daily_std = df_calc[ccy].std()
+            annual_std = daily_std * np.sqrt(252) * 100 if daily_std > 0 else 0
+            adopted_risks.append({
+                "通貨": ccy,
+                "比率": f"{weight*100:.0f}%",
+                "年率標準偏差": f"{annual_std:.2f}%"
+            })
+    adopted_df = pd.DataFrame(adopted_risks)
+    st.dataframe(adopted_df.sort_values("年率標準偏差", ascending=False), hide_index=True)
+    # ここから元の表示を続ける
     df_full = res['df_full']
     target_notional = res['target_notional']
     calc_capital = res['capital']
