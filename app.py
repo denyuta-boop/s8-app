@@ -512,4 +512,25 @@ if 'results' in st.session_state:
     fig_corr.update_layout(title="動きの比較 (相関)", height=400)
     st.plotly_chart(fig_corr, use_container_width=True)
     
+    # バックテストの後（fig_corrのplotly_chartの直後）に追加
+    st.subheader("バスケットごとの年率標準偏差（リスク）")
+    
+    # 日次リターンから年率標準偏差を計算
+    buy_daily_std = buy_series.std()
+    sell_daily_std = sell_series.std()
+    portfolio_daily_std = (buy_series - sell_series).std()
+    
+    buy_annual_std = buy_daily_std * np.sqrt(252) * 100 if buy_daily_std > 0 else 0
+    sell_annual_std = sell_daily_std * np.sqrt(252) * 100 if sell_daily_std > 0 else 0
+    portfolio_annual_std = portfolio_daily_std * np.sqrt(252) * 100 if portfolio_daily_std > 0 else 0
+    
+    # メトリクスでわかりやすく表示
+    col_r1, col_r2, col_r3 = st.columns(3)
+    col_r1.metric("買いバスケット", f"{buy_annual_std:.2f}%")
+    col_r2.metric("売りバスケット", f"{sell_annual_std:.2f}%")
+    col_r3.metric("全ポートフォリオ", f"{portfolio_annual_std:.2f}%")
+    
+    # 参考として個別通貨のテーブルもここに置くと見やすいかも（任意）
+    # （すでに上部に表示している場合は省略OK）
+    
     st.info(f"💡 **最適化期間({res['calc_period']})での相関係数: {best['corr']:.4f}**")
