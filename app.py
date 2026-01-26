@@ -362,28 +362,125 @@ if st.button("🚀 計算スタート", type="primary"):
             'df_calc': df_calc  # 後続で使用
         }
 
-# --- 結果表示 ---
+# --- 結果表示部分（ここ以降は変更なしなので省略可ですが、完全版として残します）---
 if 'results' in st.session_state:
     res = st.session_state['results']
     best = res['best']
-    is_fallback = res['is_fallback']
-    df_calc = res['df_calc']
+    is_fallback = res.get('is_fallback', False)
     
-    st.subheader("採用通貨の年率標準偏差")
-    risks = []
-    for ccy, w in {**best['buy'], **best['sell']}.items():
-        if ccy in df_calc:
-            std = df_calc[ccy].std() * np.sqrt(252) * 100
-            risks.append({"通貨": ccy, "比率": f"{w*100:.0f}%", "年率標準偏差": f"{std:.2f}%"})
-    st.dataframe(pd.DataFrame(risks).sort_values("年率標準偏差", ascending=False), hide_index=True)
+    st.subheader("採用通貨の年率標準偏差（最適プラン内）")
+    adopted_risks = []
+    for ccy, weight in {**best['buy'], **best['sell']}.items():
+        if ccy in df_calc.columns:
+            daily_std = df_calc[ccy].std()
+            annual_std = daily_std * np.sqrt(252) * 100 if daily_std > 0 else 0
+            adopted_risks.append({
+                "通貨": ccy,
+                "比率": f"{weight*100:.0f}%",
+                "年率標準偏差": f"{annual_std:.2f}%"
+            })
+    adopted_df = pd.DataFrame(adopted_risks)
+    st.dataframe(adopted_df.sort_values("年率標準偏差", ascending=False), hide_index=True)
     
-    # 以下は元の結果表示部分（メトリクス、注文レシピ、バックテストグラフなど）を省略せず入れると長くなるため、
-    # 必要に応じて元のコードからコピーして貼り付けてください。
-    # ここでは核心部分のみ示しました。
-
+    df_full = res['df_full']
+    target_notional = res['target_notional']
+    calc_capital = res['capital']
+    current_rates = res['current_rates']
+    lot_inputs = res.get('lot_inputs', {k: 10000 for k in TICKER_MAP.keys()})
+    
+    best_swap_val = best['swap'] if not np.isnan(best['swap']) else 0
+    
     if is_fallback:
-        st.warning("完全条件を満たすプランなし → 参考プラン表示")
+        st.warning("⚠️ 条件（β・相関）を完全に満たすプランが見つかりませんでした。参考プランを表示します。")
     else:
-        st.success("最適プランが見つかりました！")
+        st.success("🎉 計算完了！最適なプランが見つかりました")
     
-    # 残りの表示（予想スワップ、バックテストなど）は元のコードを参考に追加してください
+    st.info(f"最適化基準: {res['calc_period']} のデータを使用")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("💰 予想日次スワップ", f"¥{int(best_swap_val):,}")
+    m1.metric("📈 予想年利", f"{(best_swap_val * 365 / calc_capital * 100):.1f}%")
+    m2.metric("⚖️ ポートフォリオβ", f"{best['beta']:.4f}")
+    m3.metric("🛡️ 最低必要証拠金 (維持率100%)", f"¥{int(target_notional / 25):,}")
+    
+    st.subheader("📋 注文レシピ")
+    orders = []
+    side_notional = target_notional / 2
+    for ccy, w in best['buy'].items():
+        rate = current_rates.get(ccy, 0)
+        if rate > 0:
+            amount_jpy = side_notional * w
+            unit_size = lot_inputs.get(ccy, 10000)
+            lots = amount_jpy / (rate * unit_size)
+            orders.append({
+                "売買": "買い",
+                "通貨ペア": ccy,
+                "比率": f"{w*100:.0f}%",
+                "金額(円)": f"¥{int(amount_jpy):,}",
+                "推奨ロット": round(lots, 2)
+            })
+    for ccy, w in best['sell'].items():
+        rate = current_rates.get(ccy, 0)
+        if rate > 0:
+            amount_jpy = side_notional * w
+            unit_size = lot_inputs.get(ccy, 10000)
+            lots = amount_jpy / (rate * unit_size)
+            orders.append({
+                "売買": "売り",
+                "通貨ペア": ccy,
+                "比率": f"{w*100:.0f}%",
+                "金額(円)": f"¥{int(amount_jpy):,}",
+                "推奨ロット": round(lots, 2)
+            })
+    st.dataframe(pd.DataFrame(orders), hide_index=True)
+    
+    st.markdown("---")
+    st.subheader(f"📊 バックテスト ({plot_period_option})")
+    
+    if "1年" in plot_period_option: df_plot = df_full.tail(250)
+    elif "2年" in plot_period_option: df_plot = df_full.tail(500)
+    else: df_plot = df_full
+    
+    buy_series = pd.Series(0.0, index=df_plot.index)
+    for ccy, w in best['buy'].items(): buy_series += df_plot[ccy] * w
+    sell_series = pd.Series(0.0, index=df_plot.index)
+    for ccy, w in best['sell'].items(): sell_series += df_plot[ccy] * w
+    
+    total_pl = ((buy_series - sell_series) * side_notional + best_swap_val).cumsum()
+    capital_only = ((buy_series - sell_series) * side_notional).cumsum()
+    
+    total_pl_pct = (total_pl / calc_capital) * 100
+    capital_only_pct = (capital_only / calc_capital) * 100
+    
+    fig_bt = go.Figure()
+    fig_bt.add_trace(go.Scatter(x=total_pl.index, y=total_pl_pct.values, name='合計損益 (%)', line=dict(color='green', width=2)))
+    fig_bt.add_trace(go.Scatter(x=capital_only.index, y=capital_only_pct.values, name='為替損益のみ (%)', line=dict(color='gray', dash='dot')))
+    fig_bt.update_layout(title="損益推移 (対元本比率)", height=400, yaxis_title="損益率 (%)", yaxis_ticksuffix="%")
+    st.plotly_chart(fig_bt, use_container_width=True)
+    
+    buy_nav = (1 + buy_series).cumprod() * 100
+    sell_nav = (1 + sell_series).cumprod() * 100
+    
+    fig_corr = go.Figure()
+    fig_corr.add_trace(go.Scatter(x=buy_nav.index, y=buy_nav.values, name="買いバスケット", line=dict(color='blue')))
+    fig_corr.add_trace(go.Scatter(x=sell_nav.index, y=sell_nav.values, name="売りバスケット", line=dict(color='red')))
+    fig_corr.update_layout(title="動きの比較 (相関)", height=400)
+    st.plotly_chart(fig_corr, use_container_width=True)
+    
+    st.subheader("バスケットごとの年率標準偏差（リスク）")
+    buy_daily_std = buy_series.std()
+    sell_daily_std = sell_series.std()
+    portfolio_daily_std = (buy_series - sell_series).std()
+    
+    buy_annual_std = buy_daily_std * np.sqrt(252) * 100 if buy_daily_std > 0 else 0
+    sell_annual_std = sell_daily_std * np.sqrt(252) * 100 if sell_daily_std > 0 else 0
+    portfolio_annual_std = portfolio_daily_std * np.sqrt(252) * 100 if portfolio_daily_std > 0 else 0
+    
+    col_r1, col_r2, col_r3 = st.columns(3)
+    col_r1.metric("買いバスケット", f"{buy_annual_std:.2f}%")
+    col_r2.metric("売りバスケット", f"{sell_annual_std:.2f}%")
+    col_r3.metric("全ポートフォリオ", f"{portfolio_annual_std:.2f}%")
+    
+    st.info(
+        f"💡 **最適化期間({res['calc_period']})での相関係数: {best['corr']:.4f}** "
+        f"（日次の対数変化率で計算。価格水準ではなく値動きの連動性を測っています）"
+    )
