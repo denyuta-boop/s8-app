@@ -90,29 +90,56 @@ def calculate_beta(asset_returns, benchmark_returns):
     return slope if not np.isnan(slope) else 0.0
 
 def generate_weights(n):
+    """
+    通貨数の重みを5%刻み（0.05単位）で生成します。
+    合計が必ず1.0（100%）になるようにします。
+    """
     weights = []
-    if n == 1: return [{0: 1.0}]
-    step = 10
-    if n == 2:
-        for i in range(1, step): weights.append({0: i/step, 1: (step-i)/step})
+    step = 20  # 100 / 5 = 20 → 5%刻み
+    denom = 1.0 / step  # 0.05
+
+    if n == 1:
+        return [{0: 1.0}]
+
+    elif n == 2:
+        for i in range(1, step):
+            w1 = i * denom
+            w2 = 1.0 - w1
+            weights.append({0: w1, 1: w2})
+
     elif n == 3:
-        for i in range(1, step-1):
-            for j in range(1, step-i):
-                k = step - i - j
-                if k > 0: weights.append({0: i/step, 1: j/step, 2: k/step})
+        for i in range(1, step - 1):
+            w1 = i * denom
+            for j in range(1, step - i):
+                w2 = j * denom
+                w3 = 1.0 - w1 - w2
+                if w3 > 0:  # 0より大きいことを確認
+                    weights.append({0: w1, 1: w2, 2: w3})
+
     elif n == 4:
-        for i in range(1, step-2):
-            for j in range(1, step-i-1):
-                for k in range(1, step-i-j):
-                    l = step - i - j - k
-                    if l > 0: weights.append({0: i/step, 1: j/step, 2: k/step, 3: l/step})
+        for i in range(1, step - 2):
+            w1 = i * denom
+            for j in range(1, step - i - 1):
+                w2 = j * denom
+                for k in range(1, step - i - j):
+                    w3 = k * denom
+                    w4 = 1.0 - w1 - w2 - w3
+                    if w4 > 0:
+                        weights.append({0: w1, 1: w2, 2: w3, 3: w4})
+
     elif n == 5:
-        for i in range(1, step-3):
-            for j in range(1, step-i-2):
-                for k in range(1, step-i-j-1):
-                    for l in range(1, step-i-j-k):
-                        m = step - i - j - k - l
-                        if m > 0: weights.append({0: i/step, 1: j/step, 2: k/step, 3: l/step, 4: m/step})
+        for i in range(1, step - 3):
+            w1 = i * denom
+            for j in range(1, step - i - 2):
+                w2 = j * denom
+                for k in range(1, step - i - j - 1):
+                    w3 = k * denom
+                    for l in range(1, step - i - j - k):
+                        w4 = l * denom
+                        w5 = 1.0 - w1 - w2 - w3 - w4
+                        if w5 > 0:
+                            weights.append({0: w1, 1: w2, 2: w3, 3: w4, 4: w5})
+
     return weights
 
 # --- サイドバー ---
