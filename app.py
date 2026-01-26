@@ -151,7 +151,7 @@ with st.sidebar:
     
     if not is_demo_mode:
         st.success("🔓 フル機能モード")
-        default_other_limit = 40
+        default_other_limit = 50
         default_buy_range = (2, 4)
         default_sell_range = (2, 3)
     else:
@@ -161,7 +161,7 @@ with st.sidebar:
         default_sell_range = (1, 1)
     
     capital = st.number_input("💰 運用資金 (円)", value=1000000, step=100000)
-    leverage = st.number_input("⚙️ 目標レバレッジ (倍)", value=16.0, step=0.1)
+    leverage = st.number_input("⚙️ 目標レバレッジ (倍)", value=16.66, step=0.1)
     
     with st.expander("📝 スワップ & Lot単位設定"):
         swap_inputs = {}
@@ -193,15 +193,15 @@ with st.sidebar:
     with col_a:
         st.markdown("**TRYJPY**")
         try_min_pct = st.slider("最低 %", 0, 50, 5, 5, key="try_min")
-        try_max_pct = st.slider("最高 %", try_min_pct, 100, 35, 5, key="try_max")
+        try_max_pct = st.slider("最高 %", try_min_pct, 100, 95, 5, key="try_max")
     with col_b:
         st.markdown("**MXNJPY**")
         mxn_min_pct = st.slider("最低 %", 0, 50, 5, 5, key="mxn_min")
-        mxn_max_pct = st.slider("最高 %", mxn_min_pct, 100, 40, 5, key="mxn_max")
+        mxn_max_pct = st.slider("最高 %", mxn_min_pct, 100, 95, 5, key="mxn_max")
     with col_c:
         st.markdown("**ZARJPY**")
-        zar_min_pct = st.slider("最低 %", 0, 50, 0, 5, key="zar_min")
-        zar_max_pct = st.slider("最高 %", zar_min_pct, 100, 35, 5, key="zar_max")
+        zar_min_pct = st.slider("最低 %", 0, 50, 5, 5, key="zar_min")
+        zar_max_pct = st.slider("最高 %", zar_min_pct, 100, 95, 5, key="zar_max")
     
     st.caption("その他の通貨の上限")
     other_limit = st.slider("TRY/MXN/ZAR以外の上限 %", 10, 100, default_other_limit, 10)
