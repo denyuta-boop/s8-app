@@ -91,12 +91,12 @@ def calculate_beta(asset_returns, benchmark_returns):
 
 def generate_weights(n):
     """
-    通貨数の重みを5%刻み（0.05単位）で生成します。
+    通貨数の重みを10%刻み（0.1単位）で生成します。
     合計が必ず1.0（100%）になるようにします。
     """
     weights = []
-    step = 20  # 100 / 5 = 20 → 5%刻み
-    denom = 1.0 / step  # 0.05
+    step = 10          # ← ここを10に戻す（10%刻み）
+    denom = 1.0 / step  # 0.1
 
     if n == 1:
         return [{0: 1.0}]
@@ -113,7 +113,7 @@ def generate_weights(n):
             for j in range(1, step - i):
                 w2 = j * denom
                 w3 = 1.0 - w1 - w2
-                if w3 > 0:  # 0より大きいことを確認
+                if w3 > 0:
                     weights.append({0: w1, 1: w2, 2: w3})
 
     elif n == 4:
@@ -141,7 +141,6 @@ def generate_weights(n):
                             weights.append({0: w1, 1: w2, 2: w3, 3: w4, 4: w5})
 
     return weights
-
 # --- サイドバー ---
 with st.sidebar:
     st.header("⚙️ 設定パネル")
