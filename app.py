@@ -22,9 +22,9 @@ BUY_GROUP = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY", "HUFJPY"]  # HUF�
 SELL_GROUP = ["USDJPY", "CHFJPY", "EURJPY"]
 
 DEFAULT_SWAP = {
-    "MXNJPY": 13.6, "PLNJPY": 35.0, "ZARJPY": 13.1, "TRYJPY": 24.1,
-    "CZKJPY": 6.0, "HUFJPY": 15.0,  # HUF追加: ※ブローカーの実際の値に要更新
-    "USDJPY": -126.0, "CHFJPY": 10.0, "EURJPY": -65.0
+    "MXNJPY": 14.1, "PLNJPY": 32.0, "ZARJPY": 13.1, "TRYJPY": 25.1,
+    "CZKJPY": 5.5, "HUFJPY": 6.0,  # HUF追加: ※ブローカーの実際の値に要更新
+    "USDJPY": -155.0, "CHFJPY": 35.0, "EURJPY": -70.0
 }
 
 DEFAULT_LOT_UNIT = 10000
