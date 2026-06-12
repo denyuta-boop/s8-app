@@ -14,15 +14,16 @@ st.set_page_config(page_title="S8戦略 自動最適化ツール", layout="wide"
 TICKER_MAP = {
     "USDJPY": "USDJPY=X", "MXNJPY": "MXNJPY=X", "PLNJPY": "PLNJPY=X",
     "CZKJPY": "CZKJPY=X", "CHFJPY": "CHFJPY=X", "ZARJPY": "ZARJPY=X",
-    "TRYJPY": "TRYJPY=X", "EURJPY": "EURJPY=X"
+    "TRYJPY": "TRYJPY=X", "EURJPY": "EURJPY=X",
+    "USDHUF": "USDHUF=X",  # HUF追加: 直接レートがないためUSDHUFを取得しHUFJPYを合成する
 }
 
-BUY_GROUP = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY"]
+BUY_GROUP = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY", "HUFJPY"]  # HUF追加
 SELL_GROUP = ["USDJPY", "CHFJPY", "EURJPY"]
 
 DEFAULT_SWAP = {
     "MXNJPY": 13.6, "PLNJPY": 35.0, "ZARJPY": 13.1, "TRYJPY": 24.1,
-    "CZKJPY": 6.0,
+    "CZKJPY": 6.0, "HUFJPY": 15.0,  # HUF追加: ※ブローカーの実際の値に要更新
     "USDJPY": -126.0, "CHFJPY": 10.0, "EURJPY": -65.0
 }
 
@@ -83,6 +84,14 @@ def fetch_data(days=1095):
                 time.sleep(1)
 
         final_df = df_usd_clean.join(df_others_clean, how='outer').ffill().bfill()
+
+        # HUF追加: HUFJPY = USDJPY ÷ USDHUF で合成（価格ベースで行い、その後リターンを算出）
+        if "USDJPY" in final_df.columns and "USDHUF" in final_df.columns:
+            final_df["HUFJPY"] = final_df["USDJPY"] / final_df["USDHUF"]
+            final_df.drop(columns=["USDHUF"], inplace=True)
+        elif "USDHUF" in final_df.columns:
+            final_df.drop(columns=["USDHUF"], inplace=True)  # 合成失敗時も中間列は除去
+
         if final_df.empty or len(final_df) < 10:
             return None, {}, None, debug_logs
 
