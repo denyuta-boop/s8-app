@@ -175,6 +175,34 @@ def calc_sharpe(buy_series, sell_series, daily_swap, side_notional, capital):
     return sharpe if not np.isnan(sharpe) else 0.0
 
 
+def calc_calmar(buy_series, sell_series, daily_swap, side_notional, capital):
+    """
+    カルマーレシオを計算する。
+    - 年率リターン = 日次損益(為替+スワップ)の平均 × 252 / capital
+    - 最大ドローダウン = 累積損益の峰からの最大落ち幅 / capital
+    - カルマーレシオ = 年率リターン ÷ 最大ドローダウン（絶対値）
+    じわじわ下がる通貨（TRY等）はドローダウンが深くなるため低スコアになる。
+    """
+    buy_simple = np.expm1(buy_series)
+    sell_simple = np.expm1(sell_series)
+
+    daily_pl = (buy_simple - sell_simple) * side_notional + daily_swap
+    cumulative_pl = daily_pl.cumsum()
+
+    # 最大ドローダウン計算
+    rolling_max = cumulative_pl.cummax()
+    drawdown = cumulative_pl - rolling_max  # 常に0以下
+    max_drawdown = drawdown.min()  # 最も深い谷（負の値）
+
+    if max_drawdown == 0 or np.isnan(max_drawdown):
+        return 0.0
+
+    annual_return = daily_pl.mean() * 252
+    # max_drawdownは負値なので絶対値で割る
+    calmar = annual_return / abs(max_drawdown)
+    return calmar if not np.isnan(calmar) else 0.0
+
+
 # --- サイドバー ---
 with st.sidebar:
     st.header("⚙️ 設定パネル")
@@ -224,6 +252,14 @@ with st.sidebar:
         index=0,
         help="「シャープレシオ最大」は為替損益＋スワップをリスクで割った値が最大のプランを選びます"
     )
+    # カルマーレシオの重みは全モードで共通設定
+    calmar_weight = st.slider(
+        "カルマーレシオの重み",
+        0.0, 1.0, 0.5, 0.1,
+        help="ドローダウンへのペナルティ強さ。大きいほどじわじわ下がる通貨（TRY等）が排除されやすくなる"
+    )
+    st.caption("score = シャープレシオ + カルマー重み × カルマーレシオ")
+
     if optimization_mode == "カスタム加重":
         swap_weight = st.slider("スワップの重み", 0.0, 1.0, 0.5, 0.1)
         sharpe_weight = 1.0 - swap_weight
@@ -416,25 +452,28 @@ if st.button("🚀 計算スタート", type="primary"):
                 if abs(net_beta) < target_beta:
                     corr = b["series"].corr(s["series"])
 
-                    # ★ NEW: シャープレシオを計算
+                    # ★ シャープレシオ＋カルマーレシオを計算
                     sharpe = calc_sharpe(
                         b["series"], s["series"],
                         total_swap, side_notional, capital
                     )
+                    calmar = calc_calmar(
+                        b["series"], s["series"],
+                        total_swap, side_notional, capital
+                    )
 
-                    # ★ NEW: 最適化スコア計算
+                    # 最適化スコア計算（全モード共通でカルマー項を加算）
                     if optimization_mode == "スワップ最大 (旧方式)":
-                        score = total_swap
+                        score = total_swap + calmar_weight * calmar
                     elif optimization_mode == "シャープレシオ最大 (推奨)":
-                        score = sharpe
+                        score = sharpe + calmar_weight * calmar
                     else:  # カスタム加重
-                        # スワップとシャープレシオを正規化して加重合成（後で正規化するため生値で保存）
-                        score = None  # 後で一括正規化
+                        score = None  # 後で一括正規化（カルマーも含む）
 
                     plan = {
                         "buy": b["pattern"], "sell": s["pattern"],
                         "beta": net_beta, "swap": total_swap,
-                        "corr": corr, "sharpe": sharpe, "score": score
+                        "corr": corr, "sharpe": sharpe, "calmar": calmar, "score": score
                     }
                     if corr > target_corr:
                         valid_plans.append(plan)
@@ -444,28 +483,32 @@ if st.button("🚀 計算スタート", type="primary"):
                     fallback_plans.append({
                         "buy": b["pattern"], "sell": s["pattern"],
                         "beta": net_beta, "swap": total_swap,
-                        "corr": None, "sharpe": None, "score": None,
+                        "corr": None, "sharpe": None, "calmar": None, "score": None,
                         "_b_series": b["series"], "_s_series": s["series"]
                     })
 
         # ★ NEW: カスタム加重の場合は一括正規化してスコア計算
-        def apply_custom_score(plans, sw_weight, sh_weight):
+        def apply_custom_score(plans, sw_weight, sh_weight, c_weight):
             swaps = [p["swap"] for p in plans if p["swap"] is not None]
             sharpes = [p["sharpe"] for p in plans if p["sharpe"] is not None]
+            calmars = [p["calmar"] for p in plans if p["calmar"] is not None]
             if not swaps or not sharpes:
                 return plans
             swap_min, swap_range = min(swaps), max(swaps) - min(swaps)
             sharpe_min, sharpe_range = min(sharpes), max(sharpes) - min(sharpes)
+            calmar_min = min(calmars) if calmars else 0
+            calmar_range = (max(calmars) - min(calmars)) if calmars else 1
             for p in plans:
                 if p["swap"] is not None and p["sharpe"] is not None:
                     norm_swap = (p["swap"] - swap_min) / swap_range if swap_range > 0 else 0
                     norm_sharpe = (p["sharpe"] - sharpe_min) / sharpe_range if sharpe_range > 0 else 0
-                    p["score"] = sw_weight * norm_swap + sh_weight * norm_sharpe
+                    norm_calmar = ((p["calmar"] or 0) - calmar_min) / calmar_range if calmar_range > 0 else 0
+                    p["score"] = sw_weight * norm_swap + sh_weight * norm_sharpe + c_weight * norm_calmar
             return plans
 
         if optimization_mode == "カスタム加重":
-            valid_plans = apply_custom_score(valid_plans, swap_weight, sharpe_weight)
-            fallback_plans = apply_custom_score(fallback_plans, swap_weight, sharpe_weight)
+            valid_plans = apply_custom_score(valid_plans, swap_weight, sharpe_weight, calmar_weight)
+            fallback_plans = apply_custom_score(fallback_plans, swap_weight, sharpe_weight, calmar_weight)
 
         final_best = None
         is_fallback = False
@@ -480,6 +523,11 @@ if st.button("🚀 計算スタート", type="primary"):
                 final_best["corr"] = final_best["_b_series"].corr(final_best["_s_series"])
             if final_best.get("sharpe") is None and "_b_series" in final_best:
                 final_best["sharpe"] = calc_sharpe(
+                    final_best["_b_series"], final_best["_s_series"],
+                    final_best["swap"], side_notional, capital
+                )
+            if final_best.get("calmar") is None and "_b_series" in final_best:
+                final_best["calmar"] = calc_calmar(
                     final_best["_b_series"], final_best["_s_series"],
                     final_best["swap"], side_notional, capital
                 )
@@ -502,6 +550,7 @@ if st.button("🚀 計算スタート", type="primary"):
             'current_rates': current_rates, 'lot_inputs': lot_inputs,
             'df_calc': df_calc,
             'optimization_mode': optimization_mode,
+            'calmar_weight': calmar_weight,
             'valid_count': len(valid_plans),
         }
 
@@ -535,6 +584,7 @@ if 'results' in st.session_state:
 
     best_swap_val = best['swap'] if not np.isnan(best['swap']) else 0
     best_sharpe = best.get('sharpe')
+    best_calmar = best.get('calmar')
     opt_mode = res.get('optimization_mode', 'シャープレシオ最大 (推奨)')
 
     if is_fallback:
@@ -544,18 +594,22 @@ if 'results' in st.session_state:
 
     st.info(f"最適化基準: {res['calc_period']} のデータを使用")
 
-    # ★ NEW: メトリクスにシャープレシオを追加
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("💰 予想日次スワップ", f"¥{int(best_swap_val):,}")
     m1.metric("📈 予想年利 (スワップのみ)", f"{(best_swap_val * 365 / calc_capital * 100):.1f}%")
     m2.metric("⚖️ ポートフォリオβ", f"{best['beta']:.4f}")
     m3.metric("🛡️ 最低必要証拠金 (維持率100%)", f"¥{int(target_notional / 25):,}")
     if best_sharpe is not None:
-        sharpe_color = "normal" if best_sharpe >= 0 else "inverse"
         m4.metric(
             "📊 シャープレシオ (年率)",
             f"{best_sharpe:.2f}",
             help="為替損益＋スワップを含む総合的なリスク調整後リターン。高いほど効率的。"
+        )
+    if best_calmar is not None:
+        m5.metric(
+            "📉 カルマーレシオ",
+            f"{best_calmar:.2f}",
+            help="年率リターン÷最大ドローダウン。低いほどじわじわ下がる局面があった。"
         )
 
     # ★ NEW: スワップ上位プランとシャープレシオ上位プランの比較表示
