@@ -15,10 +15,10 @@ TICKER_MAP = {
     "USDJPY": "USDJPY=X", "MXNJPY": "MXNJPY=X", "PLNJPY": "PLNJPY=X",
     "CZKJPY": "CZKJPY=X", "CHFJPY": "CHFJPY=X", "ZARJPY": "ZARJPY=X",
     "TRYJPY": "TRYJPY=X", "EURJPY": "EURJPY=X",
-    "USDHUF": "USDHUF=X",  # HUF追加: 直接レートがないためUSDHUFを取得しHUFJPYを合成する
+    "USDHUF": "USDHUF=X",
 }
 
-BUY_GROUP = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY", "HUFJPY"]  # HUF追加
+BUY_GROUP = ["MXNJPY", "ZARJPY", "PLNJPY", "TRYJPY", "CZKJPY", "HUFJPY"]
 SELL_GROUP = ["USDJPY", "CHFJPY", "EURJPY"]
 
 DEFAULT_SWAP = {
@@ -29,7 +29,7 @@ DEFAULT_SWAP = {
 
 DEFAULT_LOT_UNIT = {
     "MXNJPY": 10000, "ZARJPY": 10000, "PLNJPY": 10000,
-    "TRYJPY": 10000, "CZKJPY": 10000, "HUFJPY": 100000,  # HUFは100,000通貨単位
+    "TRYJPY": 10000, "CZKJPY": 10000, "HUFJPY": 100000,
     "USDJPY": 10000, "CHFJPY": 10000, "EURJPY": 10000,
 }
 
@@ -83,18 +83,16 @@ def fetch_data(days=1095):
                             df_others_clean[matched_name] = df_temp[col]
                     break
             except Exception as e:
-                # FIX: 空のexceptを修正。エラー内容をデバッグログに記録する
                 debug_logs.append(f"Others Attempt {attempt+1} failed: {str(e)}")
                 time.sleep(1)
 
         final_df = df_usd_clean.join(df_others_clean, how='outer').ffill().bfill()
 
-        # HUF追加: HUFJPY = USDJPY ÷ USDHUF で合成（価格ベースで行い、その後リターンを算出）
         if "USDJPY" in final_df.columns and "USDHUF" in final_df.columns:
             final_df["HUFJPY"] = final_df["USDJPY"] / final_df["USDHUF"]
             final_df.drop(columns=["USDHUF"], inplace=True)
         elif "USDHUF" in final_df.columns:
-            final_df.drop(columns=["USDHUF"], inplace=True)  # 合成失敗時も中間列は除去
+            final_df.drop(columns=["USDHUF"], inplace=True)
 
         if final_df.empty or len(final_df) < 10:
             return None, {}, None, debug_logs
@@ -119,30 +117,21 @@ def calculate_beta(asset_returns, benchmark_returns):
 
 
 def generate_weights(n):
-    """
-    通貨数の重みを10%刻みで生成します。
-    FIX: 最後の重みを整数演算で確定させることで浮動小数点の累積誤差を防止します。
-    例: w5 = 1.0 - w1 - w2 - w3 - w4 (誤差が累積) →
-        m = step - i - j - k - l; w5 = m/step (整数ベースで正確)
-    """
     step = 10
     weights = []
 
     if n == 1:
         return [{0: 1.0}]
-
     elif n == 2:
         for i in range(1, step):
             j = step - i
             weights.append({0: i / step, 1: j / step})
-
     elif n == 3:
         for i in range(1, step - 1):
             for j in range(1, step - i):
                 k = step - i - j
                 if k > 0:
                     weights.append({0: i / step, 1: j / step, 2: k / step})
-
     elif n == 4:
         for i in range(1, step - 2):
             for j in range(1, step - i - 1):
@@ -150,7 +139,6 @@ def generate_weights(n):
                     l = step - i - j - k
                     if l > 0:
                         weights.append({0: i / step, 1: j / step, 2: k / step, 3: l / step})
-
     elif n == 5:
         for i in range(1, step - 3):
             for j in range(1, step - i - 2):
@@ -159,8 +147,32 @@ def generate_weights(n):
                         m = step - i - j - k - l
                         if m > 0:
                             weights.append({0: i / step, 1: j / step, 2: k / step, 3: l / step, 4: m / step})
-
     return weights
+
+
+def calc_sharpe(buy_series, sell_series, daily_swap, side_notional, capital):
+    """
+    シャープレシオを計算する。
+    - リターン = (買いバスケット - 売りバスケット) の日次損益 + スワップ
+    - リスク   = 日次損益の標準偏差
+    - スワップは固定日次収益として毎日加算
+    """
+    # 対数リターン → 単純リターンに変換してP&L計算
+    buy_simple = np.expm1(buy_series)
+    sell_simple = np.expm1(sell_series)
+
+    daily_pl = (buy_simple - sell_simple) * side_notional + daily_swap  # 円ベース日次損益
+    daily_pl_pct = daily_pl / capital  # 元本比率
+
+    mean_daily = daily_pl_pct.mean()
+    std_daily = daily_pl_pct.std()
+
+    if std_daily == 0 or np.isnan(std_daily):
+        return 0.0
+
+    # 年率シャープレシオ（リスクフリーレート=0）
+    sharpe = (mean_daily / std_daily) * np.sqrt(252)
+    return sharpe if not np.isnan(sharpe) else 0.0
 
 
 # --- サイドバー ---
@@ -202,6 +214,23 @@ with st.sidebar:
                 c1, c2 = st.columns([1.2, 1])
                 with c1: swap_inputs[ccy] = st.number_input(f"{ccy} Swap", value=float(val), step=0.1, key=f"swap_{ccy}")
                 with c2: lot_inputs[ccy] = st.number_input("単位", value=DEFAULT_LOT_UNIT.get(ccy, 10000), step=1000, key=f"lot_{ccy}")
+
+    st.markdown("---")
+    st.subheader("🎯 最適化スコア設定")
+    # ★ NEW: 最適化スコアの重みづけ設定
+    optimization_mode = st.radio(
+        "最適化の基準",
+        ["シャープレシオ最大 (推奨)", "スワップ最大 (旧方式)", "カスタム加重"],
+        index=0,
+        help="「シャープレシオ最大」は為替損益＋スワップをリスクで割った値が最大のプランを選びます"
+    )
+    if optimization_mode == "カスタム加重":
+        swap_weight = st.slider("スワップの重み", 0.0, 1.0, 0.5, 0.1)
+        sharpe_weight = 1.0 - swap_weight
+        st.caption(f"シャープレシオ重み: {sharpe_weight:.1f} / スワップ重み: {swap_weight:.1f}")
+    else:
+        swap_weight = 0.0
+        sharpe_weight = 1.0
 
     st.markdown("---")
     st.subheader("🛡️ リスク制御")
@@ -288,6 +317,7 @@ if st.button("🚀 計算スタート", type="primary"):
         }
 
         target_notional = capital * leverage
+        side_notional = target_notional / 2
         valid_plans = []
         fallback_plans = []
         rejected_by_ratio = total_combinations = 0
@@ -338,7 +368,6 @@ if st.button("🚀 計算スタート", type="primary"):
                     b_series = sum(df_calc[ccy] * w for ccy, w in pattern.items())
 
                     daily_swap = 0.0
-                    side_notional = target_notional / 2
                     valid = True
                     for ccy, w in pattern.items():
                         rate = current_rates.get(ccy, 0)
@@ -349,7 +378,10 @@ if st.button("🚀 計算スタート", type="primary"):
                         daily_swap += lots * swap_inputs.get(ccy, 0)
 
                     if valid:
-                        buy_precalc.append({"pattern": pattern, "beta": b_beta, "series": b_series, "swap": daily_swap})
+                        buy_precalc.append({
+                            "pattern": pattern, "beta": b_beta,
+                            "series": b_series, "swap": daily_swap
+                        })
 
         sell_precalc = []
         for size in range(sell_count_range[0], min(sell_count_range[1], len(sell_candidates)) + 1):
@@ -361,7 +393,6 @@ if st.button("🚀 計算スタート", type="primary"):
                     s_series = sum(df_calc[ccy] * w for ccy, w in pattern.items())
 
                     daily_swap = 0.0
-                    side_notional = target_notional / 2
                     valid = True
                     for ccy, w in pattern.items():
                         rate = current_rates.get(ccy, 0)
@@ -372,10 +403,11 @@ if st.button("🚀 計算スタート", type="primary"):
                         daily_swap += lots * swap_inputs.get(ccy, 0)
 
                     if valid:
-                        sell_precalc.append({"pattern": pattern, "beta": s_beta, "series": s_series, "swap": daily_swap})
+                        sell_precalc.append({
+                            "pattern": pattern, "beta": s_beta,
+                            "series": s_series, "swap": daily_swap
+                        })
 
-        # FIX: β条件を先にチェックし、不合格の組み合わせは相関計算をスキップ（O(n²)のコスト削減）
-        # β不合格のfallbackプランは選出後に相関を遅延計算する
         for b in buy_precalc:
             for s in sell_precalc:
                 net_beta = b["beta"] + s["beta"]
@@ -383,36 +415,76 @@ if st.button("🚀 計算スタート", type="primary"):
 
                 if abs(net_beta) < target_beta:
                     corr = b["series"].corr(s["series"])
+
+                    # ★ NEW: シャープレシオを計算
+                    sharpe = calc_sharpe(
+                        b["series"], s["series"],
+                        total_swap, side_notional, capital
+                    )
+
+                    # ★ NEW: 最適化スコア計算
+                    if optimization_mode == "スワップ最大 (旧方式)":
+                        score = total_swap
+                    elif optimization_mode == "シャープレシオ最大 (推奨)":
+                        score = sharpe
+                    else:  # カスタム加重
+                        # スワップとシャープレシオを正規化して加重合成（後で正規化するため生値で保存）
+                        score = None  # 後で一括正規化
+
                     plan = {
                         "buy": b["pattern"], "sell": s["pattern"],
-                        "beta": net_beta, "swap": total_swap, "corr": corr
+                        "beta": net_beta, "swap": total_swap,
+                        "corr": corr, "sharpe": sharpe, "score": score
                     }
                     if corr > target_corr:
                         valid_plans.append(plan)
                     else:
                         fallback_plans.append(plan)
                 else:
-                    # β不合格: 相関計算をスキップし、Seriesを保持して後で補完
                     fallback_plans.append({
                         "buy": b["pattern"], "sell": s["pattern"],
-                        "beta": net_beta, "swap": total_swap, "corr": None,
+                        "beta": net_beta, "swap": total_swap,
+                        "corr": None, "sharpe": None, "score": None,
                         "_b_series": b["series"], "_s_series": s["series"]
                     })
+
+        # ★ NEW: カスタム加重の場合は一括正規化してスコア計算
+        def apply_custom_score(plans, sw_weight, sh_weight):
+            swaps = [p["swap"] for p in plans if p["swap"] is not None]
+            sharpes = [p["sharpe"] for p in plans if p["sharpe"] is not None]
+            if not swaps or not sharpes:
+                return plans
+            swap_min, swap_range = min(swaps), max(swaps) - min(swaps)
+            sharpe_min, sharpe_range = min(sharpes), max(sharpes) - min(sharpes)
+            for p in plans:
+                if p["swap"] is not None and p["sharpe"] is not None:
+                    norm_swap = (p["swap"] - swap_min) / swap_range if swap_range > 0 else 0
+                    norm_sharpe = (p["sharpe"] - sharpe_min) / sharpe_range if sharpe_range > 0 else 0
+                    p["score"] = sw_weight * norm_swap + sh_weight * norm_sharpe
+            return plans
+
+        if optimization_mode == "カスタム加重":
+            valid_plans = apply_custom_score(valid_plans, swap_weight, sharpe_weight)
+            fallback_plans = apply_custom_score(fallback_plans, swap_weight, sharpe_weight)
 
         final_best = None
         is_fallback = False
         if valid_plans:
-            valid_plans.sort(key=lambda x: x["swap"], reverse=True)
+            # ★ CHANGED: スワップのみでなくscoreでソート
+            valid_plans.sort(key=lambda x: x["score"] if x["score"] is not None else -999, reverse=True)
             final_best = valid_plans[0]
         elif fallback_plans:
-            fallback_plans.sort(key=lambda x: (abs(x["beta"]), -x["swap"]))
+            fallback_plans.sort(key=lambda x: (abs(x["beta"]), -(x["score"] or -999)))
             final_best = fallback_plans[0]
-            # β不合格で相関が未計算の場合のみ補完
             if final_best.get("corr") is None:
                 final_best["corr"] = final_best["_b_series"].corr(final_best["_s_series"])
+            if final_best.get("sharpe") is None and "_b_series" in final_best:
+                final_best["sharpe"] = calc_sharpe(
+                    final_best["_b_series"], final_best["_s_series"],
+                    final_best["swap"], side_notional, capital
+                )
             is_fallback = True
 
-        # FIX: session_stateに大きなSeriesオブジェクトを保存しないよう除去
         if final_best:
             final_best.pop("_b_series", None)
             final_best.pop("_s_series", None)
@@ -428,7 +500,9 @@ if st.button("🚀 計算スタート", type="primary"):
             'df_full': df_full, 'calc_period': calc_period_option,
             'target_notional': target_notional, 'capital': capital,
             'current_rates': current_rates, 'lot_inputs': lot_inputs,
-            'df_calc': df_calc
+            'df_calc': df_calc,
+            'optimization_mode': optimization_mode,
+            'valid_count': len(valid_plans),
         }
 
 
@@ -437,7 +511,6 @@ if 'results' in st.session_state:
     res = st.session_state['results']
     best = res['best']
     is_fallback = res.get('is_fallback', False)
-    # FIX: df_calcをsession_stateから取得（ボタン未押下時のNameErrorを修正）
     df_calc = res['df_calc']
 
     st.subheader("採用通貨の年率標準偏差（最適プラン内）")
@@ -461,18 +534,32 @@ if 'results' in st.session_state:
     lot_inputs = res.get('lot_inputs', {ccy: DEFAULT_LOT_UNIT.get(ccy, 10000) for ccy in TICKER_MAP.keys()})
 
     best_swap_val = best['swap'] if not np.isnan(best['swap']) else 0
+    best_sharpe = best.get('sharpe')
+    opt_mode = res.get('optimization_mode', 'シャープレシオ最大 (推奨)')
 
     if is_fallback:
         st.warning("⚠️ 条件（β・相関）を完全に満たすプランが見つかりませんでした。参考プランを表示します。")
     else:
-        st.success("🎉 計算完了！最適なプランが見つかりました")
+        st.success(f"🎉 計算完了！最適なプランが見つかりました（{opt_mode} / {res.get('valid_count', 0)}件から選出）")
 
     st.info(f"最適化基準: {res['calc_period']} のデータを使用")
-    m1, m2, m3 = st.columns(3)
+
+    # ★ NEW: メトリクスにシャープレシオを追加
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("💰 予想日次スワップ", f"¥{int(best_swap_val):,}")
-    m1.metric("📈 予想年利", f"{(best_swap_val * 365 / calc_capital * 100):.1f}%")
+    m1.metric("📈 予想年利 (スワップのみ)", f"{(best_swap_val * 365 / calc_capital * 100):.1f}%")
     m2.metric("⚖️ ポートフォリオβ", f"{best['beta']:.4f}")
     m3.metric("🛡️ 最低必要証拠金 (維持率100%)", f"¥{int(target_notional / 25):,}")
+    if best_sharpe is not None:
+        sharpe_color = "normal" if best_sharpe >= 0 else "inverse"
+        m4.metric(
+            "📊 シャープレシオ (年率)",
+            f"{best_sharpe:.2f}",
+            help="為替損益＋スワップを含む総合的なリスク調整後リターン。高いほど効率的。"
+        )
+
+    # ★ NEW: スワップ上位プランとシャープレシオ上位プランの比較表示
+    st.markdown("---")
 
     st.subheader("📋 注文レシピ")
     orders = []
@@ -510,13 +597,11 @@ if 'results' in st.session_state:
     elif "2年" in plot_period_option: df_plot = df_full.tail(500)
     else: df_plot = df_full
 
-    # 対数リターンを加重合成（バックテスト用）
     buy_log_series = pd.Series(0.0, index=df_plot.index)
     for ccy, w in best['buy'].items(): buy_log_series += df_plot[ccy] * w
     sell_log_series = pd.Series(0.0, index=df_plot.index)
     for ccy, w in best['sell'].items(): sell_log_series += df_plot[ccy] * w
 
-    # FIX: 対数リターン→単純リターンに変換してP&L計算（長期で乖離しないよう精度向上）
     buy_series = np.expm1(buy_log_series)
     sell_series = np.expm1(sell_log_series)
 
@@ -529,16 +614,15 @@ if 'results' in st.session_state:
     fig_bt = go.Figure()
     fig_bt.add_trace(go.Scatter(
         x=total_pl.index, y=total_pl_pct.values,
-        name='合計損益 (%)', line=dict(color='green', width=2)
+        name='合計損益 (スワップ込み)', line=dict(color='green', width=2)
     ))
     fig_bt.add_trace(go.Scatter(
         x=capital_only.index, y=capital_only_pct.values,
-        name='為替損益のみ (%)', line=dict(color='gray', dash='dot')
+        name='為替損益のみ', line=dict(color='gray', dash='dot')
     ))
     fig_bt.update_layout(title="損益推移 (対元本比率)", height=400, yaxis_title="損益率 (%)", yaxis_ticksuffix="%")
     st.plotly_chart(fig_bt, use_container_width=True)
 
-    # FIX: NAVは累積対数リターンから正確に変換（(1+log_r).cumprod()は近似値）
     buy_nav = np.exp(buy_log_series.cumsum()) * 100
     sell_nav = np.exp(sell_log_series.cumsum()) * 100
 
