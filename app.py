@@ -23,11 +23,15 @@ SELL_GROUP = ["USDJPY", "CHFJPY", "EURJPY"]
 
 DEFAULT_SWAP = {
     "MXNJPY": 14.1, "PLNJPY": 32.0, "ZARJPY": 13.1, "TRYJPY": 25.1,
-    "CZKJPY": 5.5, "HUFJPY": 6.0,  # HUF追加: ※ブローカーの実際の値に要更新
+    "CZKJPY": 5.5, "HUFJPY": 6.0,
     "USDJPY": -155.0, "CHFJPY": 35.0, "EURJPY": -70.0
 }
 
-DEFAULT_LOT_UNIT = 10000
+DEFAULT_LOT_UNIT = {
+    "MXNJPY": 10000, "ZARJPY": 10000, "PLNJPY": 10000,
+    "TRYJPY": 10000, "CZKJPY": 10000, "HUFJPY": 100000,  # HUFは100,000通貨単位
+    "USDJPY": 10000, "CHFJPY": 10000, "EURJPY": 10000,
+}
 
 # --- 関数定義 ---
 @st.cache_data(ttl=3600)
@@ -190,14 +194,14 @@ with st.sidebar:
                 val = DEFAULT_SWAP.get(ccy, 0.0)
                 c1, c2 = st.columns([1.2, 1])
                 with c1: swap_inputs[ccy] = st.number_input(f"{ccy} Swap", value=float(val), step=0.1, key=f"swap_{ccy}")
-                with c2: lot_inputs[ccy] = st.number_input("単位", value=DEFAULT_LOT_UNIT, step=1000, key=f"lot_{ccy}")
+                with c2: lot_inputs[ccy] = st.number_input("単位", value=DEFAULT_LOT_UNIT.get(ccy, 10000), step=1000, key=f"lot_{ccy}")
         with col_s2:
             st.markdown("##### 🔴 売り (支払)")
             for ccy in SELL_GROUP:
                 val = DEFAULT_SWAP.get(ccy, 0.0)
                 c1, c2 = st.columns([1.2, 1])
                 with c1: swap_inputs[ccy] = st.number_input(f"{ccy} Swap", value=float(val), step=0.1, key=f"swap_{ccy}")
-                with c2: lot_inputs[ccy] = st.number_input("単位", value=DEFAULT_LOT_UNIT, step=1000, key=f"lot_{ccy}")
+                with c2: lot_inputs[ccy] = st.number_input("単位", value=DEFAULT_LOT_UNIT.get(ccy, 10000), step=1000, key=f"lot_{ccy}")
 
     st.markdown("---")
     st.subheader("🛡️ リスク制御")
@@ -454,7 +458,7 @@ if 'results' in st.session_state:
     target_notional = res['target_notional']
     calc_capital = res['capital']
     current_rates = res['current_rates']
-    lot_inputs = res.get('lot_inputs', {k: 10000 for k in TICKER_MAP.keys()})
+    lot_inputs = res.get('lot_inputs', {ccy: DEFAULT_LOT_UNIT.get(ccy, 10000) for ccy in TICKER_MAP.keys()})
 
     best_swap_val = best['swap'] if not np.isnan(best['swap']) else 0
 
@@ -477,7 +481,7 @@ if 'results' in st.session_state:
         rate = current_rates.get(ccy, 0)
         if rate > 0:
             amount_jpy = side_notional * w
-            unit_size = lot_inputs.get(ccy, 10000)
+            unit_size = lot_inputs.get(ccy, DEFAULT_LOT_UNIT.get(ccy, 10000))
             lots = amount_jpy / (rate * unit_size)
             orders.append({
                 "売買": "買い", "通貨ペア": ccy,
@@ -489,7 +493,7 @@ if 'results' in st.session_state:
         rate = current_rates.get(ccy, 0)
         if rate > 0:
             amount_jpy = side_notional * w
-            unit_size = lot_inputs.get(ccy, 10000)
+            unit_size = lot_inputs.get(ccy, DEFAULT_LOT_UNIT.get(ccy, 10000))
             lots = amount_jpy / (rate * unit_size)
             orders.append({
                 "売買": "売り", "通貨ペア": ccy,
