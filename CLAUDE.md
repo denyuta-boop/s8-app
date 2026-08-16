@@ -8,7 +8,7 @@
 
 | 関数 | 役割 |
 |------|------|
-| `fetch_data(days=1095)` | yfinance から為替データを取得しlog対数リターンを返す。`@st.cache_data(ttl=3600)` でキャッシュ。HUFJPY は USDJPY/USDHUF から合成。 |
+| `fetch_data(days=1095)` | yfinance から為替データを取得しlog対数リターンを返す。`@st.cache_data(ttl=3600)` でキャッシュ。HUFJPY は下記の通り合成。 |
 | `calculate_beta(asset, benchmark)` | 線形回帰で対USDJPYのβを計算 |
 | `generate_weights(n)` | n通貨の重みの組み合わせを10%刻みで列挙 |
 | `calc_sharpe(...)` | 日次損益をcapitalで正規化し年率シャープレシオを算出 |
@@ -41,6 +41,18 @@ fetch_data() → df_full (log returns, 全期間)
 
 結果表示: session_state['results'] から読み出し
 ```
+
+## HUFJPY の合成
+
+Yahoo Finance に `HUFJPY=X` が存在しないため、`fetch_data()` 内で以下の式で合成している：
+
+```
+HUFJPY = USDJPY / USDHUF
+```
+
+「1ドル = X円」÷「1ドル = Yフォリント」=「1フォリント = X/Y 円」。
+合成後は `USDHUF` 列を削除し、他の通貨ペアと同じように扱う。
+yfinance 側で USDHUF のデータが取れない場合は HUFJPY も存在しない列になるため、最適化ループ前の欠損チェックで検出される。
 
 ## 認証
 
