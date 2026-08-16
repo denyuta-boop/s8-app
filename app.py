@@ -200,7 +200,8 @@ def calc_calmar(buy_series, sell_series, daily_swap, side_notional, capital):
     annual_return = daily_pl.mean() * 252
     # max_drawdownは負値なので絶対値で割る
     calmar = annual_return / abs(max_drawdown)
-    return calmar if not np.isnan(calmar) else 0.0
+    # 微小ドローダウンによる爆発的な値を防ぐため上限を設定
+    return float(np.clip(calmar, -10.0, 10.0)) if not np.isnan(calmar) else 0.0
 
 
 # --- サイドバー ---
@@ -464,7 +465,9 @@ if st.button("🚀 計算スタート", type="primary"):
 
                     # 最適化スコア計算（全モード共通でカルマー項を加算）
                     if optimization_mode == "スワップ最大 (旧方式)":
-                        score = total_swap + calmar_weight * calmar
+                        # total_swapをcapitalで正規化して年率収益率(無次元)に変換しCalmarと同スケールにする
+                        swap_annualized = total_swap * 365 / capital
+                        score = swap_annualized + calmar_weight * calmar
                     elif optimization_mode == "シャープレシオ最大 (推奨)":
                         score = sharpe + calmar_weight * calmar
                     else:  # カスタム加重
@@ -502,8 +505,9 @@ if st.button("🚀 計算スタート", type="primary"):
                 if p["swap"] is not None and p["sharpe"] is not None:
                     norm_swap = (p["swap"] - swap_min) / swap_range if swap_range > 0 else 0
                     norm_sharpe = (p["sharpe"] - sharpe_min) / sharpe_range if sharpe_range > 0 else 0
-                    norm_calmar = ((p["calmar"] or 0) - calmar_min) / calmar_range if calmar_range > 0 else 0
-                    p["score"] = sw_weight * norm_swap + sh_weight * norm_sharpe + c_weight * norm_calmar
+                    norm_calmar = ((p["calmar"] if p["calmar"] is not None else 0) - calmar_min) / calmar_range if calmar_range > 0 else 0
+                    total_weight = sw_weight + sh_weight + c_weight
+                    p["score"] = (sw_weight * norm_swap + sh_weight * norm_sharpe + c_weight * norm_calmar) / total_weight
             return plans
 
         if optimization_mode == "カスタム加重":
@@ -517,7 +521,7 @@ if st.button("🚀 計算スタート", type="primary"):
             valid_plans.sort(key=lambda x: x["score"] if x["score"] is not None else -999, reverse=True)
             final_best = valid_plans[0]
         elif fallback_plans:
-            fallback_plans.sort(key=lambda x: (abs(x["beta"]), -(x["score"] or -999)))
+            fallback_plans.sort(key=lambda x: (abs(x["beta"]), -(x["score"] if x["score"] is not None else -999)))
             final_best = fallback_plans[0]
             if final_best.get("corr") is None:
                 final_best["corr"] = final_best["_b_series"].corr(final_best["_s_series"])
