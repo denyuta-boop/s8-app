@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,6 +7,16 @@ from scipy import stats
 import plotly.graph_objects as go
 import itertools
 import time
+
+
+def _load_secret_password() -> str:
+    """st.secrets(本番) または APP_PASSWORD 環境変数(ローカル)からパスワードを取得する。"""
+    try:
+        return str(st.secrets.get("APP_PASSWORD", ""))
+    except Exception:
+        return os.environ.get("APP_PASSWORD", "")
+
+_SECRET_PW = _load_secret_password()
 
 # --- ページ設定 ---
 st.set_page_config(page_title="S8戦略 自動最適化ツール", layout="wide")
@@ -209,7 +220,7 @@ with st.sidebar:
     st.header("⚙️ 設定パネル")
 
     password = st.text_input("🔑 パスワード (未入力でデモモード)", type="password")
-    is_demo_mode = password != "s6secret"
+    is_demo_mode = not password or not _SECRET_PW or password != _SECRET_PW
 
     if not is_demo_mode:
         st.success("🔓 フル機能モード")
@@ -259,12 +270,22 @@ with st.sidebar:
         0.0, 1.0, 0.5, 0.1,
         help="ドローダウンへのペナルティ強さ。大きいほどじわじわ下がる通貨（TRY等）が排除されやすくなる"
     )
-    st.caption("score = シャープレシオ + カルマー重み × カルマーレシオ")
+
+    if optimization_mode == "シャープレシオ最大 (推奨)":
+        st.caption("score = シャープレシオ + カルマー重み × カルマーレシオ")
+    elif optimization_mode == "スワップ最大 (旧方式)":
+        st.caption("score = スワップ年率収益率 + カルマー重み × カルマーレシオ")
+    else:
+        st.caption("score = 正規化(スワップ・シャープ・カルマー)の加重平均")
 
     if optimization_mode == "カスタム加重":
         swap_weight = st.slider("スワップの重み", 0.0, 1.0, 0.5, 0.1)
         sharpe_weight = 1.0 - swap_weight
-        st.caption(f"シャープレシオ重み: {sharpe_weight:.1f} / スワップ重み: {swap_weight:.1f}")
+        total_w = swap_weight + sharpe_weight + calmar_weight
+        eff_sw = swap_weight / total_w if total_w > 0 else 0
+        eff_sh = sharpe_weight / total_w if total_w > 0 else 0
+        eff_cal = calmar_weight / total_w if total_w > 0 else 0
+        st.caption(f"実効ウェイト — スワップ: {eff_sw:.0%} / シャープ: {eff_sh:.0%} / カルマー: {eff_cal:.0%}")
     else:
         swap_weight = 0.0
         sharpe_weight = 1.0
@@ -346,6 +367,13 @@ if st.button("🚀 計算スタート", type="primary"):
 
         if "USDJPY" not in df_calc.columns:
             st.error("USDJPYデータなし")
+            st.stop()
+
+        required_ccys = set(buy_candidates) | set(sell_candidates)
+        missing_ccys = required_ccys - set(df_calc.columns)
+        if missing_ccys:
+            st.error(f"以下の通貨データが取得できませんでした: {', '.join(sorted(missing_ccys))}。時間をおいて再試行してください。")
+            with st.expander("デバッグ"): [st.write(log) for log in debug_logs]
             st.stop()
 
         betas = {
